@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # ----------------------------
 # LOAD MODELS
 # ----------------------------
-device = "cuda" if torch.cuda.is_available() else "cpu"  # A 제거!
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 det_model = YOLOWorld("yolov8s-worldv2.pt")
 det_model.to(device)
@@ -23,7 +23,7 @@ sam_model.to(device)
 app = FastAPI()
 
 # ----------------------------
-# CORS 설정
+# CORS
 # ----------------------------
 app.add_middleware(
     CORSMiddleware,
@@ -71,18 +71,18 @@ def post_refine(mask: np.ndarray):
     return clean
 
 # ----------------------------
-# Health Check (Railway 필수!)
+# HEALTH CHECK
 # ----------------------------
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "Wall Segmentation Server is running"}
+    return {"status": "ok", "message": "Wall Segmentation Server"}
 
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
 
 # ----------------------------
-# DETECT WALL + RETURN MASK
+# SEGMENT WALL
 # ----------------------------
 @app.post("/segment_wall_mask")
 async def segment_wall_mask(file: UploadFile = File(...)):
@@ -141,7 +141,7 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         )
         
     except Exception as e:
-        print(f"Error in segment_wall_mask: {e}")
+        print(f"Error: {e}")
         return Response(
             content=str(e).encode(),
             status_code=500,

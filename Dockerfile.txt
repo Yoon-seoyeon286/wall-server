@@ -2,26 +2,29 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# 시스템 패키지
+# 시스템 패키지 설치
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
     libgl1-mesa-glx \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Torch 먼저 설치 (CPU 버전)
+# pip 업그레이드
+RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# Torch CPU 버전 먼저 설치
 RUN pip install --no-cache-dir \
     torch==2.1.0 \
     torchvision==0.16.0 \
     --index-url https://download.pytorch.org/whl/cpu
 
-# 나머지 패키지 설치
+# requirements.txt 설치
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 앱 코드 복사
 COPY server.py .
-COPY models ./models
 
-EXPOSE 8000
-
+# Railway는 PORT 환경변수 자동 제공
 CMD uvicorn server:app --host 0.0.0.0 --port $PORT

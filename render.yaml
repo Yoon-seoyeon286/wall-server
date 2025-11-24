@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: wall-segment-server
-    runtime: docker
-    region: singapore
-    plan: free
-    dockerfilePath: ./Dockerfile
-    healthCheckPath: /health

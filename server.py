@@ -11,11 +11,11 @@ from fastapi.middleware.cors import CORSMiddleware
 # ----------------------------
 # LOAD MODELS
 # ----------------------------
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = "cuda" if torch.cuda.is_available() else "cpu"  # A 제거!
 
 det_model = YOLOWorld("yolov8s-worldv2.pt")
 det_model.to(device)
-det_model.set_classes(["wall"])  # detect only wall class
+det_model.set_classes(["wall"])
 
 sam_model = SAM("mobile_sam.pt")
 sam_model.to(device)
@@ -23,7 +23,7 @@ sam_model.to(device)
 app = FastAPI()
 
 # ----------------------------
-# CORS 강화 ( WebGL / Mobile 필수)
+# CORS 설정
 # ----------------------------
 app.add_middleware(
     CORSMiddleware,
@@ -31,7 +31,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"]  # 추가!
+    expose_headers=["*"]
 )
 
 # ----------------------------
@@ -56,13 +56,9 @@ def post_refine(mask: np.ndarray):
     mask = mask.astype(np.uint8)
     kernel = np.ones((7, 7), np.uint8)
 
-    # Remove noise
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-
-    # Expand edges slightly
     mask = cv2.dilate(mask, kernel, iterations=1)
 
-    # Keep largest contour only
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
         return mask
@@ -70,11 +66,20 @@ def post_refine(mask: np.ndarray):
     largest = max(cnts, key=cv2.contourArea)
     clean = np.zeros_like(mask)
     cv2.drawContours(clean, [largest], -1, 1, thickness=cv2.FILLED)
-
-    # Fill internal holes
     clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel, iterations=2)
 
     return clean
+
+# ----------------------------
+# Health Check (Railway 필수!)
+# ----------------------------
+@app.get("/")
+async def root():
+    return {"status": "ok", "message": "Wall Segmentation Server is running"}
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
 
 # ----------------------------
 # DETECT WALL + RETURN MASK
@@ -85,12 +90,10 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         img = np_from_upload(await file.read())
         pil_img = img.copy()
 
-        # YOLO detect → wall boxes
         results = det_model.predict(pil_img, conf=0.20, imgsz=1024, device=device, verbose=False)[0]
         xyxy = results.boxes.xyxy.cpu().numpy() if results.boxes is not None else []
         boxes = filter_small_boxes(xyxy, pil_img.size[::-1])
 
-        # Fallback: no wall → use largest detected object as wall
         if not boxes and len(xyxy) > 0:
             areas = [(b[2] - b[0]) * (b[3] - b[1]) for b in xyxy]
             biggest = xyxy[np.argmax(areas)].tolist()
@@ -107,7 +110,6 @@ async def segment_wall_mask(file: UploadFile = File(...)):
                 }
             )
 
-        # SAM segmentation
         res = sam_model.predict(pil_img, bboxes=boxes, device=device, retina_masks=True, verbose=False)[0]
         if res.masks is None:
             return Response(
@@ -122,11 +124,8 @@ async def segment_wall_mask(file: UploadFile = File(...)):
 
         mask = res.masks.data.cpu().numpy()
         union = (mask.sum(axis=0) > 0).astype(np.uint8)
-
-        # Refine mask
         refined = post_refine(union)
 
-        # Return PNG mask (grayscale)
         mask_img = (refined * 255).astype(np.uint8)
         _, png = cv2.imencode(".png", mask_img)
 
@@ -153,7 +152,6 @@ async def segment_wall_mask(file: UploadFile = File(...)):
             }
         )
 
-# OPTIONS 요청 핸들러 추가
 @app.options("/segment_wall_mask")
 async def options_segment_wall_mask():
     return Response(

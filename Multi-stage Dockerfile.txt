@@ -1,0 +1,39 @@
+# Stage 1: 빌드 단계
+FROM python:3.10-slim as builder
+
+WORKDIR /app
+
+# 시스템 패키지
+RUN apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python 패키지 설치
+COPY requirements.txt .
+RUN pip install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/cpu \
+    torch torchvision && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Stage 2: 실행 단계 (용량 최적화)
+FROM python:3.10-slim
+
+WORKDIR /app
+
+# 필수 시스템 라이브러리만
+RUN apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 빌드 단계에서 설치한 패키지 복사
+COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+
+# 앱 코드만 복사
+COPY server.py .
+
+EXPOSE 8000
+
+CMD uvicorn server:app --host 0.0.0.0 --port $PORT

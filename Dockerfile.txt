@@ -1,35 +1,16 @@
-# Stage 1: 빌드 단계
-FROM python:3.10-slim as builder
-
-WORKDIR /app
-
-# 시스템 패키지
-RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    && rm -rf /var/lib/apt/lists/*
-
-# Python 패키지 설치
-COPY requirements.txt .
-RUN pip install --no-cache-dir \
-    --index-url https://download.pytorch.org/whl/cpu \
-    torch==2.1.0 torchvision==0.16.0 && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Stage 2: 실행 단계
 FROM python:3.10-slim
 
 WORKDIR /app
 
-# 필수 시스템 라이브러리
-RUN apt-get update && apt-get install -y \
+# 시스템 패키지 (최소화)
+RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1-mesa-glx \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# 빌드 단계에서 설치한 패키지 복사
-COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+# requirements 복사 및 설치 (한 번에)
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 앱 코드 복사
 COPY server.py .

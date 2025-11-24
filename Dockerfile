@@ -2,10 +2,11 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-# 시스템 패키지 (패키지명 업데이트)
+# 시스템 패키지 (git 추가!)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
+    git \
     libgl1 \
     libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*

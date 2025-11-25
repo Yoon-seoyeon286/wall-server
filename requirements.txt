@@ -8,3 +8,4 @@ opencv-python-headless
 ftfy
 regex
 git+https://github.com/openai/CLIP.git
+psutil

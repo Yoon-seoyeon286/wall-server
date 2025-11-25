@@ -4,7 +4,7 @@ python-multipart
 pillow
 opencv-python-headless
 psutil
-numpy<2
+numpy==1.26.4
 ultralytics==8.3.20
 torch==2.2.2
 torchaudio==2.2.2

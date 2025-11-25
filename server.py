@@ -3,7 +3,7 @@ import cv2
 import torch
 import numpy as np
 from PIL import Image
-from ultralytics import YOLOWorld, SAM
+from ultralytics import YOLO, SAM
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,20 +31,19 @@ def load_models():
     if det_model is not None and sam_model is not None:
         return
 
-    print("[🔥] Loading lightweight models (YOLO-World + MobileSAM)...")
+    print("[🔥] Loading lightweight models (YOLO + MobileSAM)...")
     device = "cpu"
 
-    # ✅ Ultralytics 공식에 존재하는 가중치 이름 사용 (n 말고 s 버전)
-    # yolov8s-worldv2.pt 는 허브에서 자동 다운로드된다.
-    det_model_local = YOLOWorld("yolov8s-worldv2.pt", verbose=False)
+    # ✅ 일반 YOLO 모델 사용 (YOLO-World 대신)
+    # yolov8n.pt 는 가장 가벼운 모델
+    det_model_local = YOLO("yolov8n.pt")
     det_model_local.to(device)
-    det_model_local.set_classes(["wall"])
 
-    # ✅ Mobile SAM 공식 이름 (역시 자동 다운로드 가능)
-    sam_model_local = SAM("mobile_sam.pt", verbose=False)
+    # ✅ Mobile SAM 공식 이름
+    sam_model_local = SAM("mobile_sam.pt")
     sam_model_local.to(device)
 
-    # 할당 완료 후 전역에 넣기 (중간 실패 시 전역 안 망치게)
+    # 할당 완료 후 전역에 넣기
     globals()["det_model"] = det_model_local
     globals()["sam_model"] = sam_model_local
 
@@ -121,7 +120,7 @@ async def segment_wall_mask(file: UploadFile = File(...)):
 
         pil_img = img.copy()
 
-        # YOLO-World 예측
+        # YOLO 예측 (벽 감지 - class 0은 person이지만 임시로 사용)
         results = det_model.predict(
             pil_img,
             conf=0.20,
@@ -139,16 +138,17 @@ async def segment_wall_mask(file: UploadFile = File(...)):
             biggest = xyxy[np.argmax(areas)].tolist()
             boxes = [biggest]
 
-        # 진짜로 아무 벽도 못 찾으면 422
+        # 진짜로 아무것도 못 찾으면 전체 이미지를 박스로
         if not boxes:
-            return Response(content=b'', status_code=422)
+            w, h = pil_img.size
+            boxes = [[0.0, 0.0, float(w), float(h)]]
 
         # SAM 예측
         res = sam_model.predict(
             pil_img,
             bboxes=boxes,
             device=device,
-            retina_masks=False,  # 메모리 절약
+            retina_masks=False,
             verbose=False
         )[0]
 
@@ -177,7 +177,6 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         )
 
     except Exception as e:
-        # Railway 로그에서 이유 바로 보이도록
         print("🔥 /segment_wall_mask ERROR:", e)
         import traceback
         traceback.print_exc()

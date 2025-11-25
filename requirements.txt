@@ -2,10 +2,22 @@ fastapi
 uvicorn[standard]
 python-multipart
 pillow
-ultralytics
-numpy
 opencv-python-headless
+psutil
+
+# 🚫 numpy 2.x 금지 → torch/ultralytics 호환 위해 고정
+numpy<2
+
+# 🛡 Ultralytics 안정판 (SAM + YOLO-World 포함)
+ultralytics==8.3.20
+
+# 🧠 Torch CPU 전용 (GPU 없음)
+torch==2.2.2+cpu
+torchaudio==2.2.2+cpu
+torchvision==0.17.2+cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# 📌 CLIP (OpenAI) — 반드시 이 버전 방식으로
 ftfy
 regex
 git+https://github.com/openai/CLIP.git
-psutil

@@ -3,54 +3,59 @@ import cv2
 import torch
 import numpy as np
 from PIL import Image
+from ultralytics import YOLOWorld, SAM
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
-from ultralytics import YOLOWorld, SAM
 
-# -------------------------------------------------------
-# ⚠️ 서버 시작 시 딱 1회만 로드 (가장 중요)
-# -------------------------------------------------------
-print("\n[🔥 WALL SERVER BOOT] Loading lightweight models...")
-
-device = "cpu"
-
-det_model = YOLOWorld("yolov8n-worldv2.pt", verbose=False)
-det_model.to(device)
-det_model.set_classes(["wall"])
-
-sam_model = SAM("mobile_sam.pt", verbose=False)
-sam_model.to(device)
-
-# Warmup: CPU 모델 준비 시간 단축
-dummy = Image.new("RGB", (64, 64), (0, 0, 0))
-_ = det_model.predict(dummy, conf=0.2, imgsz=64, device=device, verbose=False)
-
-print("[✔] Models loaded & warmed up!\n")
-
-# -------------------------------------------------------
-# FastAPI 초기화
-# -------------------------------------------------------
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True,
     expose_headers=["*"]
 )
 
+# Lazy loading
+det_model = None
+sam_model = None
+device = "cpu"
 
-# -------------------------------------------------------
-# Utilities
-# -------------------------------------------------------
+
+def load_models():
+    global det_model, sam_model, device
+
+    if det_model is not None and sam_model is not None:
+        return
+
+    print("[🔥] Loading lightweight models (YOLO-World + MobileSAM)...")
+    device = "cpu"
+
+    # ✅ Ultralytics 공식에 존재하는 가중치 이름 사용 (n 말고 s 버전)
+    # yolov8s-worldv2.pt 는 허브에서 자동 다운로드된다.
+    det_model_local = YOLOWorld("yolov8s-worldv2.pt", verbose=False)
+    det_model_local.to(device)
+    det_model_local.set_classes(["wall"])
+
+    # ✅ Mobile SAM 공식 이름 (역시 자동 다운로드 가능)
+    sam_model_local = SAM("mobile_sam.pt", verbose=False)
+    sam_model_local.to(device)
+
+    # 할당 완료 후 전역에 넣기 (중간 실패 시 전역 안 망치게)
+    globals()["det_model"] = det_model_local
+    globals()["sam_model"] = sam_model_local
+
+    print("[✔] Models loaded!")
+
+
 def np_from_upload(file_bytes: bytes) -> Image.Image:
     return Image.open(io.BytesIO(file_bytes)).convert("RGB")
 
 
-def filter_small_boxes(boxes, img_shape, min_ratio=0.02):
+def filter_small_boxes(boxes, img_shape, min_ratio=0.03):
     H, W = img_shape
     area_img = H * W
     filtered = []
@@ -63,94 +68,133 @@ def filter_small_boxes(boxes, img_shape, min_ratio=0.02):
 
 def post_refine(mask: np.ndarray):
     mask = mask.astype(np.uint8)
-    kernel = np.ones((5, 5), np.uint8)
+    kernel = np.ones((7, 7), np.uint8)
+
+    # 노이즈 제거 + 살짝 확대
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.dilate(mask, kernel, iterations=1)
 
+    # 가장 큰 연결 영역만 남기기
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
         return mask
+
     largest = max(cnts, key=cv2.contourArea)
     clean = np.zeros_like(mask)
     cv2.drawContours(clean, [largest], -1, 1, thickness=cv2.FILLED)
+    clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel, iterations=2)
     return clean
 
 
-# -------------------------------------------------------
-# Endpoints
-# -------------------------------------------------------
 @app.get("/")
 async def root():
-    return {"status": "ok", "msg": "Wall Segmentation Server (Stable CPU Mode)"}
+    return {"status": "ok", "message": "Wall Segmentation Server (Lightweight)"}
 
 
 @app.get("/health")
 async def health():
     import psutil
     process = psutil.Process()
-    mem = process.memory_info().rss / 1024 / 1024
+    memory_mb = process.memory_info().rss / 1024 / 1024
     return {
-        "status": "alive",
-        "memory_mb": round(mem, 2),
-        "models_loaded": True
+        "status": "healthy",
+        "models_loaded": det_model is not None,
+        "memory_mb": round(memory_mb, 2)
     }
 
 
 @app.post("/segment_wall_mask")
 async def segment_wall_mask(file: UploadFile = File(...)):
     try:
+        # 필요할 때만 모델 로딩 (첫 요청)
+        load_models()
+
+        # 업로드 이미지 → PIL
         img = np_from_upload(await file.read())
 
-        # Resize safely
+        # 이미지 크기 축소 (메모리 절약)
         max_size = 640
-        ratio = min(max_size / img.width, max_size / img.height)
-        if ratio < 1:
-            new_w, new_h = int(img.width * ratio), int(img.height * ratio)
-            img = img.resize((new_w, new_h), Image.LANCZOS)
+        if max(img.size) > max_size:
+            ratio = max_size / max(img.size)
+            new_size = tuple(int(dim * ratio) for dim in img.size)
+            img = img.resize(new_size, Image.LANCZOS)
 
-        # YOLO
-        result = det_model.predict(
-            img, conf=0.25, imgsz=640, device=device,
-            retina=False, verbose=False
+        pil_img = img.copy()
+
+        # YOLO-World 예측
+        results = det_model.predict(
+            pil_img,
+            conf=0.20,
+            imgsz=640,
+            device=device,
+            verbose=False
         )[0]
 
-        xyxy = result.boxes.xyxy.cpu().numpy() if result.boxes is not None else []
-        boxes = filter_small_boxes(xyxy, img.size[::-1])
+        xyxy = results.boxes.xyxy.cpu().numpy() if results.boxes is not None else []
+        boxes = filter_small_boxes(xyxy, pil_img.size[::-1])
 
+        # 박스가 너무 작아 다 걸러지면, 가장 큰 거 하나라도 선택
         if not boxes and len(xyxy) > 0:
-            largest = xyxy[np.argmax([(b[2] - b[0]) * (b[3] - b[1]) for b in xyxy])]
-            boxes = [largest.tolist()]
+            areas = [(b[2] - b[0]) * (b[3] - b[1]) for b in xyxy]
+            biggest = xyxy[np.argmax(areas)].tolist()
+            boxes = [biggest]
 
+        # 진짜로 아무 벽도 못 찾으면 422
         if not boxes:
             return Response(content=b'', status_code=422)
 
-        # SAM
-        pred = sam_model.predict(
-            img, bboxes=boxes, device=device,
-            retina_masks=False, verbose=False
+        # SAM 예측
+        res = sam_model.predict(
+            pil_img,
+            bboxes=boxes,
+            device=device,
+            retina_masks=False,  # 메모리 절약
+            verbose=False
         )[0]
 
-        if pred.masks is None:
+        if res.masks is None:
             return Response(content=b'', status_code=422)
 
-        mask = pred.masks.data.cpu().numpy()
+        mask = res.masks.data.cpu().numpy()
         union = (mask.sum(axis=0) > 0).astype(np.uint8)
         refined = post_refine(union)
 
-        out = (refined * 255).astype(np.uint8)
-        _, png = cv2.imencode(".png", out)
+        mask_img = (refined * 255).astype(np.uint8)
+        _, png = cv2.imencode(".png", mask_img)
 
-        del mask, union, refined, result, pred
-        torch.cuda.empty_cache()  # CPU에서도 안전
+        # 메모리 정리
+        del img, pil_img, results, mask, union, refined, mask_img
+        import gc
+        gc.collect()
 
         return Response(
             content=png.tobytes(),
             media_type="image/png",
-            headers={"Access-Control-Allow-Origin": "*"}
+            headers={
+                "Access-Control-Allow-Origin": "*",
+                "Cache-Control": "no-cache"
+            }
         )
 
     except Exception as e:
-        print("🔥 SERVER ERROR:", e)
+        # Railway 로그에서 이유 바로 보이도록
+        print("🔥 /segment_wall_mask ERROR:", e)
         import traceback
         traceback.print_exc()
-        return Response(content=str(e).encode(), status_code=500)
+        return Response(
+            content=str(e).encode(),
+            status_code=500
+        )
+
+
+@app.options("/segment_wall_mask")
+async def options_segment_wall_mask():
+    return Response(
+        content=b'',
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*"
+        }
+    )

@@ -144,14 +144,14 @@ async def health():
 
 @app.post("/segment_wall_mask")
 async def segment_wall_mask(file: UploadFile = File(...)):
-    """YOLOv8n으로 객체 감지 → MobileSAM으로 분할 → 후처리로 객체 마스크 (또는 가장 큰 영역) 추출"""
+    """YOLOv8n으로 객체 감지 → MobileSAM으로 분할 → 객체 마스크 반전 및 후처리로 벽 영역 추출"""
     
     # 모델 로딩 여부 확인
     if det_model is None or sam_model is None:
         logger.error("Segmentation services are unavailable due to model loading failure.")
         return Response(content="Model load failed. Check server startup logs.", status_code=503)
 
-    # 💡 [수정] 메모리 정리를 위해 변수들을 None으로 초기화합니다.
+    # 메모리 정리를 위해 변수들을 None으로 초기화합니다.
     img = pil_img = results = boxes = sam_boxes = None 
 
     try:
@@ -188,7 +188,7 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         
         logger.info(f"[✅] {len(boxes)}개의 유효 객체 박스 발견")
 
-        # 2. 예외 처리: 박스가 없거나 너무 작으면, 전체 화면 (마스크 100%)
+        # 2. 예외 처리: 박스가 없거나 너무 작으면, 벽은 전체 화면 (마스크 100%)
         if not boxes:
             logger.warning("[⚠️] 객체 박스가 없어 전체 이미지(벽) 박스 사용.")
             mask_img = np.ones((h, w), dtype=np.uint8) * 255
@@ -209,21 +209,23 @@ async def segment_wall_mask(file: UploadFile = File(...)):
                 logger.warning("[⚠️] MobileSAM 분할 실패. 전체 화면 반환.")
                 mask_img = np.ones((h, w), dtype=np.uint8) * 255
             else:
-                # 4. 마스크 통합 및 후처리 (이전 로직으로 복원)
+                # 4. 마스크 통합 및 **반전** (벽 영역 추출)
                 mask_data = res.masks.data.cpu().numpy()
                 # 모든 객체들의 통합 마스크 (객체 = 1, 배경 = 0)
-                union_mask = (mask_data.sum(axis=0) > 0).astype(np.uint8)
+                union_objects = (mask_data.sum(axis=0) > 0).astype(np.uint8)
                 
-                # 💡 객체 마스크를 후처리 (가장 큰 연결 영역만 남김 - 이전 로직)
-                # Note: 이 로직은 가장 큰 객체 또는 배경 중 하나를 선택합니다.
-                refined = post_refine(union_mask) 
+                # 💡 객체 마스크를 반전하여 벽(배경) 마스크를 얻습니다. (핵심)
+                background_mask = 1 - union_objects
+                
+                # 5. 후처리 (가장 큰 배경 영역만 남김)
+                refined = post_refine(background_mask) 
                 mask_img = (refined * 255).astype(np.uint8)
                 
                 # 6. 경계면 부드럽게 처리 (Smoothing)
                 mask_img = cv2.GaussianBlur(mask_img, (GAUSSIAN_BLUR_SIZE, GAUSSIAN_BLUR_SIZE), 0)
                 
                 # 🚨 메모리 정리 강화
-                del mask_data, union_mask, refined
+                del mask_data, union_objects, background_mask, refined
         
         # 7. 원본 크기로 복원
         if img.size != original_size:

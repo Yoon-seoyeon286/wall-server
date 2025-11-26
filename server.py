@@ -1,14 +1,20 @@
+import os
 import io
 import cv2
 import torch
 import numpy as np
 import gc
+import logging
 from PIL import Image
 from ultralytics import SAM
+# Grounding DINO Lite는 transformers를 통해 IDEA-Research/grounding-dino-tiny 모델 사용
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import Response
+from fastapi import FastAPI, File, UploadFile, Response
 from fastapi.middleware.cors import CORSMiddleware
+
+# 로깅 설정
+logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+logger = logging.getLogger(__name__)
 
 # FastAPI 앱 초기화
 app = FastAPI()
@@ -30,40 +36,41 @@ sam_model = None
 device = "cpu"
 
 
-def load_models():
-    """Grounding DINO Lite + MobileSAM 로드"""
+@app.on_event("startup")
+def load_models_on_startup():
+    """서버 시작 시 Grounding DINO Lite + MobileSAM 로드"""
     global grounding_dino_processor, grounding_dino_model, sam_model, device
     
-    if grounding_dino_model is not None and sam_model is not None:
-        return
+    logger.info("[🔥] Starting model loading for Grounding DINO Lite + MobileSAM...")
     
-    print("[🔥] Loading Grounding DINO Lite + MobileSAM...")
-    
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"[⚙️] Device: {device}")
+    # Dockerfile이 CPU 전용이므로, 명시적으로 'cpu' 사용
+    device = "cpu" 
+    logger.info(f"[⚙️] Device: {device}")
     
     try:
         # 1. Grounding DINO Lite 로드
         model_id = "IDEA-Research/grounding-dino-tiny"
-        processor_local = AutoProcessor.from_pretrained(model_id)
-        model_local = AutoModelForZeroShotObjectDetection.from_pretrained(model_id)
-        model_local.to(device)
+        
+        # 모델 로드 시 cache_dir 명시 (권한 문제 방지)
+        grounding_dino_processor = AutoProcessor.from_pretrained(model_id, cache_dir="./cache")
+        grounding_dino_model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id, cache_dir="./cache")
+        grounding_dino_model.to(device)
+        
+        logger.info("[✅] Grounding DINO Lite loaded.")
         
         # 2. MobileSAM 로드
-        sam_local = SAM("mobile_sam.pt")
-        sam_local.to(device)
-        
-        globals()["grounding_dino_processor"] = processor_local
-        globals()["grounding_dino_model"] = model_local
-        globals()["sam_model"] = sam_local
-        
-        print("[✅] Models loaded!")
+        sam_checkpoint_path = "mobile_sam.pt"
+        if not os.path.exists(sam_checkpoint_path):
+             logger.error(f"[❌] MobileSAM checkpoint not found at: {sam_checkpoint_path}")
+        else:
+            # ultralytics의 SAM 래퍼 사용
+            sam_model = SAM(sam_checkpoint_path)
+            sam_model.to(device)
+            logger.info("[✅] MobileSAM loaded.")
         
     except Exception as e:
-        print(f"[❌] Model loading failed: {e}")
-        globals()["grounding_dino_processor"] = None
-        globals()["grounding_dino_model"] = None
-        globals()["sam_model"] = None
+        logger.error(f"[❌] FATAL Model loading failed: {e}", exc_info=True)
+        # 로딩 실패 시 전역 변수는 None으로 유지됩니다.
 
 
 def np_from_upload(file_bytes: bytes) -> Image.Image:
@@ -73,6 +80,7 @@ def np_from_upload(file_bytes: bytes) -> Image.Image:
 
 def detect_walls_grounding_dino(image: Image.Image, text_prompt: str = "wall"):
     """Grounding DINO로 벽 감지"""
+    # 이미지 크기 정규화 (Grounding DINO 입력 요구사항)
     inputs = grounding_dino_processor(
         images=image,
         text=text_prompt,
@@ -83,6 +91,7 @@ def detect_walls_grounding_dino(image: Image.Image, text_prompt: str = "wall"):
         outputs = grounding_dino_model(**inputs)
     
     # 결과 후처리
+    # box_threshold를 0.3으로 낮춰서 감도를 높입니다.
     results = grounding_dino_processor.post_process_grounded_object_detection(
         outputs,
         inputs.input_ids,
@@ -93,13 +102,13 @@ def detect_walls_grounding_dino(image: Image.Image, text_prompt: str = "wall"):
     
     boxes = results["boxes"].cpu().numpy()
     scores = results["scores"].cpu().numpy()
-    labels = results["labels"]
     
-    return boxes, scores, labels
+    return boxes, scores
 
 
-def expand_mask(mask, iterations=20):
+def expand_mask(mask, iterations=25):
     """마스크 확장"""
+    # AR 환경에서 마스크를 벽에 완전히 밀착시키기 위해 확장(dilate) 사용
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (9, 9))
     return cv2.dilate(mask, kernel, iterations=iterations)
 
@@ -129,12 +138,13 @@ async def health():
 @app.post("/segment_wall_mask")
 async def segment_wall_mask(file: UploadFile = File(...)):
     """Grounding DINO로 벽 찾고 → MobileSAM으로 정밀 분할"""
+    
+    # 모델 로딩 여부 확인 (startup 이벤트에서 실패했을 경우)
+    if grounding_dino_model is None or sam_model is None:
+        logger.error("Segmentation services are unavailable due to model loading failure.")
+        return Response(content="Model load failed. Check server startup logs.", status_code=503)
+
     try:
-        load_models()
-        
-        if grounding_dino_model is None or sam_model is None:
-            return Response(content="Model load failed.", status_code=503)
-        
         file_bytes = await file.read()
         if not file_bytes:
             return Response(content="File is empty.", status_code=400)
@@ -142,7 +152,7 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         img = np_from_upload(file_bytes)
         original_size = img.size
         
-        # 리사이즈 (속도 향상)
+        # 리사이즈 (속도 향상 및 DINO Lite 입력 크기 맞추기)
         max_size = 640
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
@@ -150,33 +160,34 @@ async def segment_wall_mask(file: UploadFile = File(...)):
             img = img.resize(new_size, Image.LANCZOS)
         
         w, h = img.size
-        print(f"[📸] 이미지: {w}x{h}")
+        logger.info(f"[📸] 이미지: {w}x{h}")
         
         # 1️⃣ Grounding DINO로 벽 감지
-        print("[🔍] Grounding DINO: 벽 감지 중...")
-        boxes, scores, labels = detect_walls_grounding_dino(img, text_prompt="wall")
+        logger.info("[🔍] Grounding DINO: 벽 감지 중...")
+        boxes, scores = detect_walls_grounding_dino(img, text_prompt="wall")
         
         if len(boxes) == 0:
-            print("[⚠️] 벽을 찾지 못했습니다. 전체 이미지를 박스로 사용.")
+            logger.warning("[⚠️] 벽을 찾지 못했습니다. 전체 이미지를 박스로 사용.")
             boxes = np.array([[0, 0, w, h]])
         else:
-            print(f"[✅] {len(boxes)}개의 벽 후보 발견 (confidence: {scores[0]:.2f})")
+            logger.info(f"[✅] {len(boxes)}개의 벽 후보 발견 (최고 confidence: {scores[0]:.2f})")
         
         # 2️⃣ MobileSAM으로 정밀 분할
-        print("[🎨] MobileSAM: 정밀 분할 중...")
+        logger.info("[🎨] MobileSAM: 정밀 분할 중...")
         
-        # 박스 형식 변환: [x1, y1, x2, y2] → [[x1, y1, x2, y2]]
         sam_boxes = boxes.tolist()
         
+        # ultralytics SAM predict
         results = sam_model.predict(
             img,
             bboxes=sam_boxes,
             device=device,
-            verbose=False
+            verbose=False,
+            retina_masks=False # 일반 마스크 출력
         )[0]
         
         if results.masks is None or len(results.masks.data) == 0:
-            print("[⚠️] MobileSAM 실패. 전체 화면 사용.")
+            logger.warning("[⚠️] MobileSAM 실패. 전체 화면 사용.")
             mask = np.ones((h, w), dtype=np.uint8)
         else:
             # 모든 마스크 합치기 (여러 벽이 있을 수 있음)
@@ -184,7 +195,7 @@ async def segment_wall_mask(file: UploadFile = File(...)):
             mask = (masks.sum(axis=0) > 0).astype(np.uint8)
             
             # 확장
-            mask = expand_mask(mask, iterations=25)
+            mask = expand_mask(mask)
         
         # 원본 크기로 복원
         if img.size != original_size:
@@ -202,21 +213,21 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         total_pixels = mask_img.shape[0] * mask_img.shape[1]
         coverage = (wall_pixels / total_pixels) * 100
         
-        print(f"[✅] Coverage: {coverage:.1f}% ({wall_pixels}/{total_pixels} pixels)")
+        logger.info(f"[✅] Coverage: {coverage:.1f}% ({wall_pixels}/{total_pixels} pixels)")
         
-        # 너무 작으면 전체 사용
+        # 마스크 커버리지가 너무 낮으면 전체 화면을 마스크로 간주
         if coverage < 5.0:
-            print(f"[⚠️] Coverage 너무 낮음. 전체 화면 사용.")
+            logger.warning(f"[⚠️] Coverage 너무 낮음. 전체 화면 사용.")
             mask_img = np.ones_like(mask_img) * 255
         
         # PNG 인코딩
         _, png = cv2.imencode(".png", mask_img)
         
-        # 메모리 정리
-        del img, results, mask, mask_img, file_bytes, boxes, scores, labels
+        # 메모리 정리 (매우 중요)
+        del img, results, mask, mask_img, file_bytes, boxes, scores
         gc.collect()
         if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            torch.cuda.empty_cache() 
         
         return Response(
             content=png.tobytes(),
@@ -228,10 +239,9 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         )
     
     except Exception as e:
-        print(f"❌ ERROR: {e}")
-        import traceback
-        traceback.print_exc()
-        return Response(content=str(e).encode(), status_code=500)
+        logger.error(f"❌ ERROR in segmentation processing: {e}", exc_info=True)
+        # 에러 발생 시 500 오류와 함께 상세 메시지 반환
+        return Response(content=f"Internal Server Error: {e}".encode(), status_code=500)
 
 
 @app.options("/segment_wall_mask")

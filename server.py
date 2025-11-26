@@ -28,14 +28,14 @@ app.add_middleware(
 # ==============================================================================
 # 💡 [조정 가능한 설정] - Wall/Object Estimation Parameters
 # ==============================================================================
-# 1. YOLOv8 객체 감지 민감도: 낮을수록 더 많은 객체를 감지 (0.01 ~ 1.0)
-YOLO_CONF_THRESHOLD = 0.15 
-# 2. 너무 작은 객체 박스 필터링 기준: 이 비율 미만은 무시 (0.01 ~ 0.1)
-MIN_BOX_RATIO = 0.02
-# 3. 마스크 후처리 시 사용할 모폴로지 커널 크기: 클수록 정제 효과가 강함 (3 ~ 15 홀수)
+# 1. YOLOv8 객체 감지 민감도: 낮출수록 더 많은 객체를 감지하여 벽 영역에서 제외 (기존 0.15 -> 0.10)
+YOLO_CONF_THRESHOLD = 0.10 
+# 2. 너무 작은 객체 박스 필터링 기준: 낮출수록 작은 객체까지 포함하여 제외 (기존 0.02 -> 0.01)
+MIN_BOX_RATIO = 0.01
+# 3. 마스크 후처리 시 사용할 모폴로지 커널 크기: 클수록 정제 효과가 강함 (유지)
 MORPHOLOGY_KERNEL_SIZE = 9
-# 4. 최종 마스크 경계의 Gaussian Blur 크기: 클수록 경계가 더 부드러움 (5 ~ 15 홀수)
-GAUSSIAN_BLUR_SIZE = 11
+# 4. 최종 마스크 경계의 Gaussian Blur 크기: 클수록 경계가 더 부드러움 (기존 11 -> 13)
+GAUSSIAN_BLUR_SIZE = 13
 
 # 전역 변수
 det_model = None  # YOLOv8n (COCO general detection)
@@ -174,7 +174,7 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         logger.info("[🔍] YOLOv8n: 객체 감지 중...")
         results = det_model.predict(
             pil_img,
-            conf=YOLO_CONF_THRESHOLD, # 💡 조정 가능한 CONF_THRESHOLD 적용
+            conf=YOLO_CONF_THRESHOLD, # 💡 조정 가능한 CONF_THRESHOLD 적용 (0.10)
             imgsz=640,
             device=device,
             verbose=False,
@@ -182,7 +182,7 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         )[0]
 
         xyxy = results.boxes.xyxy.cpu().numpy() if results.boxes is not None else []
-        boxes = filter_small_boxes(xyxy, pil_img.size[::-1]) # 💡 조정 가능한 MIN_BOX_RATIO 적용
+        boxes = filter_small_boxes(xyxy, pil_img.size[::-1]) # 💡 조정 가능한 MIN_BOX_RATIO 적용 (0.01)
         
         logger.info(f"[✅] {len(boxes)}개의 유효 객체 박스 발견")
 
@@ -216,7 +216,7 @@ async def segment_wall_mask(file: UploadFile = File(...)):
             mask_img = (refined * 255).astype(np.uint8)
             
             # 💡 경계면 부드럽게 처리 (Smoothing)
-            mask_img = cv2.GaussianBlur(mask_img, (GAUSSIAN_BLUR_SIZE, GAUSSIAN_BLUR_SIZE), 0) # 💡 조정 가능한 GAUSSIAN_BLUR_SIZE 적용
+            mask_img = cv2.GaussianBlur(mask_img, (GAUSSIAN_BLUR_SIZE, GAUSSIAN_BLUR_SIZE), 0) # 💡 조정 가능한 GAUSSIAN_BLUR_SIZE 적용 (13)
             
             del mask_data, union, refined
         

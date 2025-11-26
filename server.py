@@ -55,8 +55,8 @@ def load_models_on_startup():
     
     logger.info("[🔥] Starting model loading for YOLOv8n + MobileSAM + MiDaS...")
     
-    # 디바이스 설정
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    # CPU 환경 설정
+    device = "cpu"
     logger.info(f"[⚙️] Device: {device}")
     
     yolo_checkpoint_path = "yolov8n.pt"  
@@ -67,6 +67,7 @@ def load_models_on_startup():
         if not os.path.exists(yolo_checkpoint_path):
              logger.error(f"[❌] YOLOv8n checkpoint not found at: {yolo_checkpoint_path}")
         else:
+            # CPU에서만 실행되도록 map_location 설정
             det_model = YOLO(yolo_checkpoint_path)
             det_model.to(device)
             logger.info("[✅] YOLOv8n loaded.")
@@ -75,13 +76,15 @@ def load_models_on_startup():
         if not os.path.exists(sam_checkpoint_path):
              logger.error(f"[❌] MobileSAM checkpoint not found at: {sam_checkpoint_path}")
         else:
+            # CPU에서만 실행되도록 map_location 설정
             sam_model = SAM(sam_checkpoint_path)
             sam_model.to(device)
             logger.info("[✅] MobileSAM loaded.")
             
         # 3. MiDaS 모델 로드 (MiDaS_small 사용)
         midas_type = "MiDaS_small"
-        midas_model = torch.hub.load("intel-isl/MiDaS", midas_type, trust_repo=True)
+        # CPU에서만 실행되도록 map_location 설정
+        midas_model = torch.hub.load("intel-isl/MiDaS", midas_type, trust_repo=True, map_location=device)
         midas_model.to(device)
         midas_model.eval()
         
@@ -90,10 +93,9 @@ def load_models_on_startup():
         if midas_type == "MiDaS_small":
             midas_transform = midas_transforms_module.small_transform
         else:
-            # DPT-Hybrid 등 다른 모델을 사용할 경우:
             midas_transform = midas_transforms_module.dpt_transform
             
-        logger.info(f"[✅] MiDaS ({midas_type}) loaded.")
+        logger.info(f"[✅] MiDaS ({midas_type}) loaded on CPU.")
 
     except Exception as e:
         logger.error(f"[❌] FATAL Model loading failed: {e}", exc_info=True)
@@ -141,10 +143,14 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
         depth_min = depth_map.min()
         depth_max = depth_map.max()
         
-        if depth_max - depth_min > 0:
-            normalized_depth = (depth_map - depth_min) / (depth_max - depth_min)
+        depth_range = depth_max - depth_min
+        
+        # 💡오류 수정 지점: depth_range가 0인 경우를 처리하고, depth_map이 확실히 NumPy 배열인지 확인
+        if depth_range > 0:
+            # NumPy 배열 연산으로 정규화 수행
+            normalized_depth = (depth_map - depth_min) / depth_range
         else:
-            normalized_depth = np.zeros_like(depth_map)
+            normalized_depth = np.zeros_like(depth_map, dtype=np.float32)
 
         # 0-255 범위의 8비트 정수형으로 변환
         normalized_depth_uint8 = (normalized_depth * 255).astype(np.uint8)
@@ -368,8 +374,9 @@ async def segment_wall_mask(
         # 🚨 메모리 정리 강화 
         del pil_img, results, boxes, sam_boxes, depth_img_np, depth_occlusion_mask
         
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache() 
+        # CPU 환경에서는 cuda.empty_cache()를 호출하지 않습니다.
+        # if torch.cuda.is_available():
+        #     torch.cuda.empty_cache() 
         
         gc.collect() 
 

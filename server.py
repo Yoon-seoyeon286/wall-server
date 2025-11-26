@@ -202,6 +202,10 @@ async def segment_wall_mask(file: UploadFile = File(...)):
             refined = post_refine(union)
             mask_img = (refined * 255).astype(np.uint8)
             
+            # 💡 경계면 부드럽게 처리 (Smoothing)
+            # 마스크 경계를 부드럽게 만들기 위해 Gaussian Blur 적용
+            mask_img = cv2.GaussianBlur(mask_img, (5, 5), 0)
+            
             del mask_data, union, refined
         
         # 5. 원본 크기로 복원

@@ -151,6 +151,9 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         logger.error("Segmentation services are unavailable due to model loading failure.")
         return Response(content="Model load failed. Check server startup logs.", status_code=503)
 
+    # 💡 [수정] 메모리 정리를 위해 변수들을 None으로 초기화합니다.
+    img = pil_img = results = boxes = sam_boxes = None 
+
     try:
         file_bytes = await file.read()
         if not file_bytes:
@@ -192,7 +195,7 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         else:
             # 3. MobileSAM 예측
             logger.info("[🎨] MobileSAM: 객체 분할 중...")
-            sam_boxes = boxes
+            sam_boxes = boxes # <--- 여기서 sam_boxes가 할당됩니다.
             
             res = sam_model.predict(
                 pil_img,
@@ -235,6 +238,7 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         _, png = cv2.imencode(".png", mask_img)
 
         # 🚨 메모리 정리 강화 
+        # 이제 sam_boxes가 항상 정의되어 있으므로 UnboundLocalError 없이 안전하게 삭제됩니다.
         del img, pil_img, results, boxes, sam_boxes
         
         if torch.cuda.is_available():

@@ -64,6 +64,18 @@ def np_from_upload(file_bytes: bytes) -> Image.Image:
     """업로드된 바이트를 PIL Image 객체로 변환합니다."""
     return Image.open(io.BytesIO(file_bytes)).convert("RGB")
 
+def expand_mask_massive(mask, iterations=50):
+    """마스크를 매우 크게 확장시킵니다."""
+    # 큰 커널 사용 (7x7)
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    expanded = cv2.dilate(mask, kernel, iterations=iterations)
+    
+    # 추가 확장: 더 큰 커널로 한 번 더
+    kernel_large = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (15, 15))
+    expanded = cv2.dilate(expanded, kernel_large, iterations=10)
+    
+    return expanded
+
 
 # ----------------------------------------------------------------------
 # FastAPI 엔드포인트

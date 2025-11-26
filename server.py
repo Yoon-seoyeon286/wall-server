@@ -7,7 +7,7 @@ import gc
 import logging
 from PIL import Image
 from ultralytics import YOLO, SAM
-from fastapi import FastAPI, File, UploadFile, Response
+from fastapi import FastAPI, File, UploadFile, Response, Form
 from fastapi.middleware.cors import CORSMiddleware
 
 # 로깅 설정
@@ -36,6 +36,8 @@ MIN_BOX_RATIO = 0.01
 MORPHOLOGY_KERNEL_SIZE = 9
 # 4. 최종 마스크 경계의 Gaussian Blur 크기: 클수록 경계가 더 부드러움 
 GAUSSIAN_BLUR_SIZE = 13
+# 5. [NEW] 깊이 맵 기반 객체 제거 민감도: 이 값보다 깊이 차이가 크면 객체로 간주 (낮출수록 민감)
+DEPTH_DIFF_THRESHOLD = 15 # 0-255 스케일의 깊이 맵에서 경계 차이 기준 (픽셀 값 기준)
 
 # 전역 변수
 det_model = None  # YOLOv8n (COCO general detection)
@@ -79,9 +81,9 @@ def load_models_on_startup():
         logger.error(f"[❌] FATAL Model loading failed: {e}", exc_info=True)
 
 
-def np_from_upload(file_bytes: bytes) -> Image.Image:
+def np_from_upload(file_bytes: bytes, mode="RGB") -> Image.Image:
     """바이트를 PIL Image로 변환"""
-    return Image.open(io.BytesIO(file_bytes)).convert("RGB")
+    return Image.open(io.BytesIO(file_bytes)).convert(mode)
 
 
 def filter_small_boxes(boxes, img_shape, min_ratio=MIN_BOX_RATIO):
@@ -121,9 +123,36 @@ def post_refine(mask: np.ndarray):
     return clean
 
 
+def create_depth_occlusion_mask(depth_map: np.ndarray, threshold=DEPTH_DIFF_THRESHOLD) -> np.ndarray:
+    """
+    깊이 지도를 사용하여 전경 객체(Occlusion) 마스크 생성.
+    인접 픽셀 간의 급격한 깊이 변화(경계)를 찾아 객체를 분리합니다.
+    """
+    if depth_map is None:
+        return None
+        
+    depth_map = depth_map.astype(np.float32)
+    
+    # Sobel 필터를 사용하여 깊이 맵의 경계(깊이 변화가 큰 부분)를 검출
+    grad_x = cv2.Sobel(depth_map, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(depth_map, cv2.CV_32F, 0, 1, ksize=3)
+    
+    # 경계 강도 계산 (Magnitude)
+    magnitude = cv2.magnitude(grad_x, grad_y)
+    
+    # 임계값 이상의 경계만 마스킹 (객체 = 1, 배경 = 0)
+    occlusion_mask = (magnitude > threshold).astype(np.uint8)
+    
+    # 마스크 확장 (dilate)하여 객체 영역을 확실하게 덮습니다.
+    kernel = np.ones((5, 5), np.uint8)
+    occlusion_mask = cv2.dilate(occlusion_mask, kernel, iterations=2)
+    
+    return occlusion_mask
+
+
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "YOLOv8n + MobileSAM Wall Segmentation Server (Tuning Ready)"}
+    return {"status": "ok", "message": "YOLOv8n + MobileSAM + Depth Integration Server"}
 
 
 @app.get("/health")
@@ -143,8 +172,11 @@ async def health():
 
 
 @app.post("/segment_wall_mask")
-async def segment_wall_mask(file: UploadFile = File(...)):
-    """YOLOv8n으로 객체 감지 → MobileSAM으로 분할 → 객체 마스크 반전 및 후처리로 벽 영역 추출"""
+async def segment_wall_mask(
+    rgb_file: UploadFile = File(..., alias="rgb_file"), # 유니티 카메라 이미지
+    depth_file: UploadFile = File(..., alias="depth_file") # 유니티 깊이 지도 (흑백 PNG 가정)
+):
+    """YOLOv8n+SAM으로 객체 감지/분할 후, 깊이 지도로 최종 가려짐 마스크를 적용하여 벽 영역 추출"""
     
     # 모델 로딩 여부 확인
     if det_model is None or sam_model is None:
@@ -152,17 +184,14 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         return Response(content="Model load failed. Check server startup logs.", status_code=503)
 
     # 메모리 정리를 위해 변수들을 None으로 초기화합니다.
-    img = pil_img = results = boxes = sam_boxes = None 
+    img = pil_img = results = boxes = sam_boxes = depth_img_np = depth_occlusion_mask = None 
 
     try:
-        file_bytes = await file.read()
-        if not file_bytes:
-            return Response(content="File is empty.", status_code=400)
-        
-        img = np_from_upload(file_bytes)
+        # 1. RGB 이미지 로드 및 전처리
+        rgb_bytes = await rgb_file.read()
+        img = np_from_upload(rgb_bytes, mode="RGB")
         original_size = img.size
         
-        # 이미지 크기 축소 (메모리 절약)
         max_size = 640
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
@@ -171,75 +200,94 @@ async def segment_wall_mask(file: UploadFile = File(...)):
 
         pil_img = img.copy()
         w, h = pil_img.size
-        logger.info(f"[📸] 이미지: {w}x{h}")
+        logger.info(f"[📸] RGB 이미지: {w}x{h}")
+        
+        # 2. 깊이 지도 로드 및 전처리 (Grayscale로 로드)
+        depth_bytes = await depth_file.read()
+        if not depth_bytes:
+            logger.warning("[⚠️] 깊이 파일이 비어 있습니다. 2D AI 마스킹만 사용합니다.")
+            depth_img_np = None
+        else:
+            depth_img = np_from_upload(depth_bytes, mode="L")
+            depth_img = depth_img.resize((w, h), Image.NEAREST) # RGB 크기에 맞게 리사이즈
+            depth_img_np = np.array(depth_img)
+            logger.info("[✅] 깊이 지도 로드 완료.")
 
-        # 1. YOLOv8n 예측 (객체 감지)
+
+        # 3. YOLOv8n + MobileSAM으로 초기 벽 마스크 생성 (기존 로직)
+        
         logger.info("[🔍] YOLOv8n: 객체 감지 중...")
         results = det_model.predict(
-            pil_img,
-            conf=YOLO_CONF_THRESHOLD, 
-            imgsz=640,
-            device=device,
-            verbose=False,
+            pil_img, conf=YOLO_CONF_THRESHOLD, imgsz=640, device=device, verbose=False,
         )[0]
-
         xyxy = results.boxes.xyxy.cpu().numpy() if results.boxes is not None else []
         boxes = filter_small_boxes(xyxy, pil_img.size[::-1])
-        
         logger.info(f"[✅] {len(boxes)}개의 유효 객체 박스 발견")
 
-        # 2. 예외 처리: 박스가 없거나 너무 작으면, 벽은 전체 화면 (마스크 100%)
         if not boxes:
             logger.warning("[⚠️] 객체 박스가 없어 전체 이미지(벽) 박스 사용.")
-            mask_img = np.ones((h, w), dtype=np.uint8) * 255
+            initial_wall_mask = np.ones((h, w), dtype=np.uint8) * 255
         else:
-            # 3. MobileSAM 예측
             logger.info("[🎨] MobileSAM: 객체 분할 중...")
             sam_boxes = boxes
-            
             res = sam_model.predict(
-                pil_img,
-                bboxes=sam_boxes,
-                device=device,
-                retina_masks=False,
-                verbose=False
+                pil_img, bboxes=sam_boxes, device=device, retina_masks=False, verbose=False
             )[0]
 
             if res.masks is None:
                 logger.warning("[⚠️] MobileSAM 분할 실패. 전체 화면 반환.")
-                mask_img = np.ones((h, w), dtype=np.uint8) * 255
+                initial_wall_mask = np.ones((h, w), dtype=np.uint8) * 255
             else:
-                # 4. 마스크 통합 및 **반전** (벽 영역 추출)
+                # 마스크 통합 및 반전 (벽 영역 추출)
                 mask_data = res.masks.data.cpu().numpy()
-                # 모든 객체들의 통합 마스크 (객체 = 1, 배경 = 0)
                 union_objects = (mask_data.sum(axis=0) > 0).astype(np.uint8)
+                background_mask = 1 - union_objects # 객체 마스크 반전
                 
-                # 💡 객체 마스크를 반전하여 벽(배경) 마스크를 얻습니다. (핵심)
-                background_mask = 1 - union_objects
+                # 후처리 (가장 큰 배경 영역만 남김)
+                refined_background = post_refine(background_mask) 
+                initial_wall_mask = (refined_background * 255).astype(np.uint8)
                 
-                # 5. 후처리 (가장 큰 배경 영역만 남김)
-                refined = post_refine(background_mask) 
-                mask_img = (refined * 255).astype(np.uint8)
-                
-                # 6. 경계면 부드럽게 처리 (Smoothing)
-                mask_img = cv2.GaussianBlur(mask_img, (GAUSSIAN_BLUR_SIZE, GAUSSIAN_BLUR_SIZE), 0)
-                
-                # 🚨 메모리 정리 강화
-                del mask_data, union_objects, background_mask, refined
+                del mask_data, union_objects, background_mask, refined_background
+
+
+        # 4. [NEW] 깊이 지도를 이용한 최종 객체 제외 마스킹 (Depth Occlusion)
+        final_mask_img = initial_wall_mask.copy()
         
-        # 7. 원본 크기로 복원
+        if depth_img_np is not None:
+            depth_occlusion_mask = create_depth_occlusion_mask(depth_img_np)
+            
+            # 깊이 마스크를 반전하여 벽 마스크(벽=1, 객체=0)를 얻고 기존 마스크와 AND 연산
+            # 객체 영역(깊이 경계가 큰 곳)을 0으로 만들어 최종 벽 마스크에서 제거
+            wall_from_depth = 1 - depth_occlusion_mask 
+            
+            # 2D AI 마스크와 3D 깊이 마스크를 결합 (두 마스크 모두 1인 영역만 남김)
+            combined_mask = cv2.bitwise_and(final_mask_img, wall_from_depth * 255)
+            final_mask_img = combined_mask
+            logger.info("[✅] 깊이 데이터로 최종 가려짐 보정 완료.")
+            
+            del wall_from_depth, combined_mask
+        else:
+            logger.warning("[⚠️] 깊이 데이터가 없어 2D AI 마스크만 사용합니다.")
+
+
+        # 5. 최종 마스크 정리 및 인코딩
+        
+        # 경계면 부드럽게 처리 (Smoothing)
+        final_mask_img = cv2.GaussianBlur(final_mask_img, (GAUSSIAN_BLUR_SIZE, GAUSSIAN_BLUR_SIZE), 0)
+        
+        # 원본 크기로 복원
         if img.size != original_size:
-            mask_img = cv2.resize(
-                mask_img, 
+            final_mask_img = cv2.resize(
+                final_mask_img, 
                 original_size, 
                 interpolation=cv2.INTER_LINEAR
             )
         
         # PNG 인코딩
-        _, png = cv2.imencode(".png", mask_img)
+        _, png = cv2.imencode(".png", final_mask_img)
 
         # 🚨 메모리 정리 강화 
-        del img, pil_img, results, boxes, sam_boxes
+        del img, pil_img, results, boxes, sam_boxes, depth_img_np, depth_occlusion_mask
         
         if torch.cuda.is_available():
             torch.cuda.empty_cache() 

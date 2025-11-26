@@ -15,7 +15,6 @@ WORKDIR /app
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 # 2. PyTorch CPU 버전 설치
-# MobileSAM을 위해 PyTorch를 명시적으로 설치합니다.
 RUN pip install --no-cache-dir \
     torch==2.2.2 \
     torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cpu
@@ -24,8 +23,9 @@ RUN pip install --no-cache-dir \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. MobileSAM 모델 파일 다운로드
+# 4. MobileSAM 및 YOLOv8n 모델 파일 다운로드
 RUN wget -O /app/mobile_sam.pt https://github.com/ultralytics/assets/releases/download/v8.2.0/mobile_sam.pt
+RUN wget -O /app/yolov8n.pt https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt
 
 # 앱 코드 복사
 COPY server.py .

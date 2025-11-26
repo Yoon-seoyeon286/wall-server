@@ -1,8 +1,9 @@
 fastapi
 uvicorn
 Pillow
-numpy
+numpy<2.0.0  # NumPy 2.x 호환성 문제 해결을 위해 1.x대로 고정
 opencv-python
 scipy
 ultralytics
-timm  # MiDaS 모델 로딩을 위해 추가
+timm
+python-multipart # FastAPI 파일 업로드 (Form data) 문제 해결을 위해 추가

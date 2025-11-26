@@ -26,15 +26,15 @@ app.add_middleware(
 )
 
 # ==============================================================================
-# 💡 [조정 가능한 설정] - Wall/Object Estimation Parameters
+# 💡 [조정 가능한 설정] - Wall/Object Estimation Parameters (객체 제외 심화)
 # ==============================================================================
-# 1. YOLOv8 객체 감지 민감도: 낮출수록 더 많은 객체를 감지하여 벽 영역에서 제외 (기존 0.15 -> 0.10)
+# 1. YOLOv8 객체 감지 민감도: 낮출수록 더 많은 객체를 감지하여 벽 영역에서 제외 (0.10)
 YOLO_CONF_THRESHOLD = 0.10 
-# 2. 너무 작은 객체 박스 필터링 기준: 낮출수록 작은 객체까지 포함하여 제외 (기존 0.02 -> 0.01)
+# 2. 너무 작은 객체 박스 필터링 기준: 낮출수록 작은 객체까지 포함하여 제외 (0.01)
 MIN_BOX_RATIO = 0.01
-# 3. 마스크 후처리 시 사용할 모폴로지 커널 크기: 클수록 정제 효과가 강함 (유지)
+# 3. 마스크 후처리 시 사용할 모폴로지 커널 크기: 클수록 정제 효과가 강함
 MORPHOLOGY_KERNEL_SIZE = 9
-# 4. 최종 마스크 경계의 Gaussian Blur 크기: 클수록 경계가 더 부드러움 (기존 11 -> 13)
+# 4. 최종 마스크 경계의 Gaussian Blur 크기: 클수록 경계가 더 부드러움 
 GAUSSIAN_BLUR_SIZE = 13
 
 # 전역 변수
@@ -107,7 +107,7 @@ def post_refine(mask: np.ndarray):
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
     mask = cv2.dilate(mask, kernel, iterations=1)
 
-    # 가장 큰 연결 영역만 남기기 (가장 큰 배경 또는 객체 영역을 찾으려는 의도)
+    # 가장 큰 연결 영역만 남기기 (가장 큰 영역을 선택하여 벽 영역을 명확히 함)
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
         return mask
@@ -144,7 +144,7 @@ async def health():
 
 @app.post("/segment_wall_mask")
 async def segment_wall_mask(file: UploadFile = File(...)):
-    """YOLOv8n으로 객체 감지 → MobileSAM으로 분할 → 후처리로 벽 영역 추출"""
+    """YOLOv8n으로 객체 감지 → MobileSAM으로 분할 → 객체 마스크 반전 및 후처리로 벽 영역 추출"""
     
     # 모델 로딩 여부 확인
     if det_model is None or sam_model is None:
@@ -170,57 +170,60 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         w, h = pil_img.size
         logger.info(f"[📸] 이미지: {w}x{h}")
 
-        # 1. YOLOv8n 예측 (COCO 모든 객체 감지)
+        # 1. YOLOv8n 예측 (객체 감지)
         logger.info("[🔍] YOLOv8n: 객체 감지 중...")
         results = det_model.predict(
             pil_img,
-            conf=YOLO_CONF_THRESHOLD, # 💡 조정 가능한 CONF_THRESHOLD 적용 (0.10)
+            conf=YOLO_CONF_THRESHOLD, 
             imgsz=640,
             device=device,
             verbose=False,
-            # classes 필터링 없이 모든 COCO 클래스 사용
         )[0]
 
         xyxy = results.boxes.xyxy.cpu().numpy() if results.boxes is not None else []
-        boxes = filter_small_boxes(xyxy, pil_img.size[::-1]) # 💡 조정 가능한 MIN_BOX_RATIO 적용 (0.01)
+        boxes = filter_small_boxes(xyxy, pil_img.size[::-1])
         
         logger.info(f"[✅] {len(boxes)}개의 유효 객체 박스 발견")
 
-        # 2. 예외 처리: 박스가 없거나 너무 작으면, 전체 이미지를 박스로 사용
+        # 2. 예외 처리: 박스가 없거나 너무 작으면, 벽은 전체 화면 (마스크 100%)
         if not boxes:
-            logger.warning("[⚠️] 객체 박스가 없어 전체 이미지 박스 사용.")
-            boxes = [[0.0, 0.0, float(w), float(h)]]
-        
-        # 3. MobileSAM 예측
-        logger.info("[🎨] MobileSAM: 객체 분할 중...")
-        sam_boxes = boxes
-        
-        res = sam_model.predict(
-            pil_img,
-            bboxes=sam_boxes,
-            device=device,
-            retina_masks=False,
-            verbose=False
-        )[0]
-
-        if res.masks is None:
-            logger.warning("[⚠️] MobileSAM 분할 실패. 전체 화면 반환.")
+            logger.warning("[⚠️] 객체 박스가 없어 전체 이미지(벽) 박스 사용.")
             mask_img = np.ones((h, w), dtype=np.uint8) * 255
         else:
-            # 4. 마스크 통합 및 후처리
-            mask_data = res.masks.data.cpu().numpy()
-            union = (mask_data.sum(axis=0) > 0).astype(np.uint8)
+            # 3. MobileSAM 예측
+            logger.info("[🎨] MobileSAM: 객체 분할 중...")
+            sam_boxes = boxes
             
-            # 후처리 (가장 큰 연결 영역만 남김)
-            refined = post_refine(union) # 💡 조정 가능한 MORPHOLOGY_KERNEL_SIZE 적용
-            mask_img = (refined * 255).astype(np.uint8)
-            
-            # 💡 경계면 부드럽게 처리 (Smoothing)
-            mask_img = cv2.GaussianBlur(mask_img, (GAUSSIAN_BLUR_SIZE, GAUSSIAN_BLUR_SIZE), 0) # 💡 조정 가능한 GAUSSIAN_BLUR_SIZE 적용 (13)
-            
-            del mask_data, union, refined
+            res = sam_model.predict(
+                pil_img,
+                bboxes=sam_boxes,
+                device=device,
+                retina_masks=False,
+                verbose=False
+            )[0]
+
+            if res.masks is None:
+                logger.warning("[⚠️] MobileSAM 분할 실패. 전체 화면 반환.")
+                mask_img = np.ones((h, w), dtype=np.uint8) * 255
+            else:
+                # 4. 마스크 통합 및 반전 (핵심 수정)
+                mask_data = res.masks.data.cpu().numpy()
+                # 모든 객체들의 통합 마스크 (객체 = 1, 배경 = 0)
+                union_objects = (mask_data.sum(axis=0) > 0).astype(np.uint8)
+                
+                # 💡 마스크 반전: 객체 마스크를 반전하여 벽(배경) 마스크를 얻습니다.
+                background_mask = 1 - union_objects
+                
+                # 5. 후처리 (가장 큰 배경 영역만 남김)
+                refined = post_refine(background_mask) 
+                mask_img = (refined * 255).astype(np.uint8)
+                
+                # 6. 경계면 부드럽게 처리 (Smoothing)
+                mask_img = cv2.GaussianBlur(mask_img, (GAUSSIAN_BLUR_SIZE, GAUSSIAN_BLUR_SIZE), 0)
+                
+                del mask_data, union_objects, background_mask, refined
         
-        # 5. 원본 크기로 복원
+        # 7. 원본 크기로 복원
         if img.size != original_size:
             mask_img = cv2.resize(
                 mask_img, 

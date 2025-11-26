@@ -1,8 +1,8 @@
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-python-multipart==0.0.6
-Pillow==10.1.0
-opencv-python-headless==4.8.1.78
-numpy==1.26.4
-ultralytics==8.3.20
-psutil==5.9.6
+fastapi
+uvicorn
+Pillow
+numpy
+opencv-python
+scipy
+ultralytics
+timm  # MiDaS 모델 로딩을 위해 추가

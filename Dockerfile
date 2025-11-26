@@ -14,16 +14,17 @@ WORKDIR /app
 # 1. pip 업그레이드
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# 2. PyTorch CPU 버전 설치
+# 2. PyTorch CPU 버전 설치 (사용자 설정 유지)
 RUN pip install --no-cache-dir \
     torch==2.2.2 \
     torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cpu
 
-# 3. 나머지 모든 패키지 설치
+# 3. 나머지 모든 패키지 설치 (MiDaS의 'timm' 포함)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. MobileSAM 및 YOLOv8n 모델 파일 다운로드
+# 4. MobileSAM 및 YOLOv8n 모델 파일 다운로드 (사용자 설정 유지)
+# MiDaS 모델은 PyTorch Hub에서 동적으로 로드됩니다.
 RUN wget -O /app/mobile_sam.pt https://github.com/ultralytics/assets/releases/download/v8.2.0/mobile_sam.pt
 RUN wget -O /app/yolov8n.pt https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt
 

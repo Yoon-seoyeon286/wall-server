@@ -59,7 +59,6 @@ def load_models():
         
     except Exception as e:
         print(f"[❌] Model loading failed: {e}")
-        # 모델 로드 실패 시 None으로 설정
         globals()["det_model"] = None
         globals()["sam_model"] = None
 
@@ -82,15 +81,14 @@ def filter_small_boxes(boxes, img_shape, min_ratio=0.03):
 
 
 def post_refine(mask: np.ndarray):
-    """마스크 후처리: 노이즈 제거, 확대, 가장 큰 영역만 남기기."""
+    """(원래 후처리 함수 - 현재 디버깅을 위해 사용되지 않음)"""
+    # 이 함수는 현재 segment_wall_mask에서 호출되지 않도록 수정되었습니다.
     mask = mask.astype(np.uint8)
     kernel = np.ones((7, 7), np.uint8)
 
-    # 노이즈 제거 + 살짝 확대 (Open -> Dilate)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
     mask = cv2.dilate(mask, kernel, iterations=1)
 
-    # 가장 큰 연결 영역만 남기기
     cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not cnts:
         return mask
@@ -99,7 +97,6 @@ def post_refine(mask: np.ndarray):
     clean = np.zeros_like(mask)
     cv2.drawContours(clean, [largest], -1, 1, thickness=cv2.FILLED)
     
-    # 마지막으로 영역 채우기 및 매끄럽게 처리 (Close)
     clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel, iterations=2)
     return clean
 
@@ -130,23 +127,19 @@ async def health():
 
 @app.post("/segment_wall_mask")
 async def segment_wall_mask(file: UploadFile = File(...)):
-    """업로드된 이미지에서 벽 분할 마스크를 PNG 파일로 반환합니다."""
+    """업로드된 이미지에서 벽 분할 마스크를 PNG 파일로 반환합니다. (후처리 건너뛰기)"""
     try:
-        # 필요할 때만 모델 로딩 (첫 요청)
         load_models()
 
         if det_model is None or sam_model is None:
-             # 모델 로드 실패 시 503 오류 반환
              return Response(content="Model load failed. Check server logs.", status_code=503)
 
-        # 업로드 이미지 → PIL
         file_bytes = await file.read()
         if not file_bytes:
              return Response(content="File is empty.", status_code=400)
              
         img = np_from_upload(file_bytes)
 
-        # 이미지 크기 축소 (메모리 절약 및 추론 속도 개선)
         max_size = 640
         if max(img.size) > max_size:
             ratio = max_size / max(img.size)
@@ -167,13 +160,11 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         xyxy = results.boxes.xyxy.cpu().numpy() if results.boxes is not None else []
         boxes = filter_small_boxes(xyxy, pil_img.size[::-1])
 
-        # 박스가 너무 작아 다 걸러지면, 가장 큰 거 하나라도 선택
         if not boxes and len(xyxy) > 0:
             areas = [(b[2] - b[0]) * (b[3] - b[1]) for b in xyxy]
             biggest = xyxy[np.argmax(areas)].tolist()
             boxes = [biggest]
 
-        # 진짜로 아무것도 못 찾으면 전체 이미지를 박스로 (안전 장치)
         if not boxes:
             w, h = pil_img.size
             boxes = [[0.0, 0.0, float(w), float(h)]]
@@ -188,13 +179,17 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         )[0]
 
         if res.masks is None:
-            # SAM이 어떤 마스크도 생성하지 못한 경우
-            return Response(content=b'', status_code=422)
+            # 422 상태 코드 반환 (마스크가 생성되지 않음)
+            return Response(content=b'', status_code=422) 
 
-        # 마스크들을 합치고 후처리
+        # 마스크들을 합치고 후처리 (이 부분이 디버깅을 위해 수정됨)
         mask = res.masks.data.cpu().numpy()
         union = (mask.sum(axis=0) > 0).astype(np.uint8)
-        refined = post_refine(union)
+        
+        # 💡 디버깅 수정 지점: post_refine을 호출하지 않고 union 마스크를 바로 사용
+        refined = union 
+        
+        # refined = post_refine(union) # <--- 원래 코드
 
         # 마스크 이미지를 PNG 바이트로 변환
         mask_img = (refined * 255).astype(np.uint8)

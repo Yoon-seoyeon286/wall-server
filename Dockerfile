@@ -3,7 +3,6 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # 1. 필수 시스템 패키지 설치
-# OpenGL 관련 패키지 (libgl1, libglib2.0-0)는 OpenCV-Python의 필수 의존성입니다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
@@ -25,22 +24,14 @@ RUN pip install --no-cache-dir \
     torchaudio==2.2.2 \
     --index-url https://download.pytorch.org/whl/cpu
 
-# 4. 나머지 패키지 설치 (NumPy 및 Ultralytics 포함)
-# NumPy를 명시적으로 설치하여 Ultralytics가 의존성을 올바르게 찾도록 합니다.
-# 안정적인 버전 1.26.4를 지정합니다.
+# 4. 나머지 패키지 설치: requirements.txt 파일 사용 (누락 방지)
+# requirements.txt 파일에 명시된 모든 패키지(fastapi, ultralytics, transformers, segment-anything 등)를 설치합니다.
 COPY requirements.txt .
-RUN pip install --no-cache-dir \
-    fastapi \
-    uvicorn[standard] \
-    python-multipart \
-    pillow \
-    opencv-python-headless \
-    psutil \
-    numpy==1.26.4 \
-    ultralytics==8.3.20
+RUN pip install --no-cache-dir -r requirements.txt
 
 # 앱 코드 복사
 COPY server.py .
 
 # FastAPI 실행
+# 유의: 고객님의 로그에서는 server.py를 사용하므로, 그대로 유지합니다.
 CMD uvicorn server:app --host 0.0.0.0 --port ${PORT:-8000}

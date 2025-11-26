@@ -2,10 +2,10 @@ fastapi==0.104.1
 uvicorn[standard]==0.24.0
 python-multipart==0.0.6
 Pillow==10.1.0
-opencv-python==4.8.1.78
+opencv-python-headless==4.8.1.78
 numpy==1.26.4
-torch==2.1.2
-torchvision==0.16.2
-transformers==4.36.0
-segment-anything==1.0 # SAM 사용을 위한 표준 패키지
+torch==2.2.2
+torchvision==0.17.2
+transformers==4.42.3  # <-- 버전 업데이트!
+ultralytics==8.3.20
 psutil==5.9.6

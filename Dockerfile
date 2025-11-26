@@ -3,6 +3,7 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # 1. 필수 시스템 패키지 설치
+# OpenGL 관련 패키지 (libgl1, libglib2.0-0)는 OpenCV-Python의 필수 의존성입니다.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
@@ -24,27 +25,11 @@ RUN pip install --no-cache-dir \
     torchaudio==2.2.2 \
     --index-url https://download.pytorch.org/whl/cpu
 
-# 4. 나머지 패키지 설치 (안정성 확보를 위해 명시적으로 설치 순서 조정)
+# 4. 나머지 모든 패키지 설치: requirements.txt 파일 사용
 COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-RUN pip install --no-cache-dir \
-    # 웹 서버 및 기본 라이브러리
-    fastapi==0.104.1 \
-    uvicorn[standard]==0.24.0 \
-    python-multipart==0.0.6 \
-    Pillow==10.1.0 \
-    opencv-python-headless==4.8.1.78 \
-    numpy==1.26.4 \
-    psutil==5.9.6
-
-RUN pip install --no-cache-dir \
-    # AI/ML 라이브러리
-    ultralytics==8.3.20 \
-    transformers==4.36.0 \
-    segment-anything==1.0
-
-
-# 앱 코드 복사
+# 앱 코드 복사 (server.py는 이전 답변의 최종 버전으로 가정합니다.)
 COPY server.py .
 
 # FastAPI 실행

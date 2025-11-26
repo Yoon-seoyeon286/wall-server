@@ -28,8 +28,9 @@ app.add_middleware(
 # ==============================================================================
 # 💡 [조정 가능한 설정] - Wall/Object Estimation Parameters (객체 제외 심화)
 # ==============================================================================
-# 1. YOLOv8 객체 감지 민감도: 낮출수록 더 많은 객체를 감지하여 벽 영역에서 제외 (0.10)
-YOLO_CONF_THRESHOLD = 0.10 
+# 1. YOLOv8 객체 감지 민감도: 낮출수록 더 많은 객체를 감지하여 벽 영역에서 제외 (0.05로 조정)
+#    (주의: 너무 낮추면 노이즈성 오탐이 증가할 수 있음)
+YOLO_CONF_THRESHOLD = 0.05 
 # 2. 너무 작은 객체 박스 필터링 기준: 낮출수록 작은 객체까지 포함하여 제외 (0.01)
 MIN_BOX_RATIO = 0.01
 # 3. 마스크 후처리 시 사용할 모폴로지 커널 크기: 클수록 정제 효과가 강함
@@ -204,10 +205,11 @@ async def segment_wall_mask(
         
         # 2. 깊이 지도 로드 및 전처리 (Grayscale로 로드)
         depth_bytes = await depth_file.read()
-        if not depth_bytes:
+        if not depth_bytes or len(depth_bytes) < 100: # 유니티에서 보낸 빈 PNG를 감지하기 위해 길이 검사 추가
             logger.warning("[⚠️] 깊이 파일이 비어 있습니다. 2D AI 마스킹만 사용합니다.")
             depth_img_np = None
         else:
+            # 깊이 이미지 로드 시 mode="L" (Grayscale)로 처리하여 단일 채널 np array로 변환
             depth_img = np_from_upload(depth_bytes, mode="L")
             depth_img = depth_img.resize((w, h), Image.NEAREST) # RGB 크기에 맞게 리사이즈
             depth_img_np = np.array(depth_img)
@@ -222,7 +224,7 @@ async def segment_wall_mask(
         )[0]
         xyxy = results.boxes.xyxy.cpu().numpy() if results.boxes is not None else []
         boxes = filter_small_boxes(xyxy, pil_img.size[::-1])
-        logger.info(f"[✅] {len(boxes)}개의 유효 객체 박스 발견")
+        logger.info(f"[✅] {len(boxes)}개의 유효 객체 박스 발견 (Threshold: {YOLO_CONF_THRESHOLD})")
 
         if not boxes:
             logger.warning("[⚠️] 객체 박스가 없어 전체 이미지(벽) 박스 사용.")

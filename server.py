@@ -65,38 +65,6 @@ def np_from_upload(file_bytes: bytes) -> Image.Image:
     return Image.open(io.BytesIO(file_bytes)).convert("RGB")
 
 
-def filter_small_boxes(boxes, img_shape, min_ratio=0.03):
-    """(현재 디버깅을 위해 사용되지 않음) 이미지 전체 면적 대비 작은 박스를 필터링합니다."""
-    H, W = img_shape
-    area_img = H * W
-    filtered = []
-    for x1, y1, x2, y2 in boxes:
-        area = (x2 - x1) * (y2 - y1)
-        if area / area_img > min_ratio:
-            filtered.append([float(x1), float(y1), float(x2), float(y2)])
-    return filtered
-
-
-def post_refine(mask: np.ndarray):
-    """(현재 디버깅을 위해 사용되지 않음) 마스크 후처리 함수."""
-    mask = mask.astype(np.uint8)
-    kernel = np.ones((7, 7), np.uint8)
-
-    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
-    mask = cv2.dilate(mask, kernel, iterations=1)
-
-    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    if not cnts:
-        return mask
-
-    largest = max(cnts, key=cv2.contourArea)
-    clean = np.zeros_like(mask)
-    cv2.drawContours(clean, [largest], -1, 1, thickness=cv2.FILLED)
-    
-    clean = cv2.morphologyEx(clean, cv2.MORPH_CLOSE, kernel, iterations=2)
-    return clean
-
-
 # ----------------------------------------------------------------------
 # FastAPI 엔드포인트
 # ----------------------------------------------------------------------
@@ -155,7 +123,7 @@ async def segment_wall_mask(file: UploadFile = File(...)):
 
         xyxy = results.boxes.xyxy.cpu().numpy() if results.boxes is not None else []
         
-        # 🚨 디버깅 수정 지점: 작은 박스 필터링 (filter_small_boxes)을 건너뛰고 모든 박스를 사용 🚨
+        # 작은 박스 필터링 (filter_small_boxes)을 건너뛰고 모든 박스를 사용
         boxes = xyxy.tolist() if xyxy.size > 0 else [] 
 
         # 박스가 하나도 없으면 전체 이미지를 박스로 (강제)
@@ -164,7 +132,7 @@ async def segment_wall_mask(file: UploadFile = File(...)):
             boxes = [[0.0, 0.0, float(w), float(h)]]
             print("[🔍] RT-DETR이 박스를 찾지 못해 전체 이미지 박스를 SAM에 강제 전달합니다.")
         else:
-            print(f"[🔍] RT-DETR이 {len(boxes)}개의 박스를 찾았습니다.")
+            print(f"[🔍] RT-DETR이 {len(boxes)}개의 박스를 찾았습니다. SAM에 전달합니다.")
 
 
         # 2. SAM-B 예측 (분할)
@@ -178,14 +146,25 @@ async def segment_wall_mask(file: UploadFile = File(...)):
 
         if res.masks is None:
             # 422 상태 코드 반환 (마스크가 생성되지 않음)
-            return Response(content=b'', status_code=422) 
+            print("[⚠️] SAM이 마스크 데이터를 전혀 생성하지 못했습니다.")
+            return Response(content="SAM failed to generate any masks.", status_code=422) 
 
-        # 마스크들을 합치고 후처리 (post_refine은 계속 건너뛴 상태)
+        # 마스크들을 합치고 후처리 (post_refine 건너뜀)
         mask = res.masks.data.cpu().numpy()
         union = (mask.sum(axis=0) > 0).astype(np.uint8)
-        
-        # 💡 디버깅 상태 유지: post_refine을 호출하지 않고 union 마스크를 바로 사용
         refined = union 
+
+        
+        # 🚨🚨🚨 최종 디버깅 로직: 마스크 픽셀 카운트 로그 및 422 반환 조건 강화 🚨🚨🚨
+        wall_pixels = np.sum(refined)
+        print(f"[🔍] Mask generated. Wall pixels (value 1): {wall_pixels}")
+        
+        if wall_pixels == 0:
+            print("[❌] Wall Mask is completely BLACK (0 Pixels detected as wall). Sending 422.")
+            # 마스크 픽셀이 0이면 빈 응답 대신 422 코드를 명확히 보냅니다.
+            return Response(content="Mask is empty after segmentation.", status_code=422)
+        # 🚨🚨🚨 디버깅 로그 추가 끝 🚨🚨🚨
+
 
         # 마스크 이미지를 PNG 바이트로 변환
         mask_img = (refined * 255).astype(np.uint8)

@@ -25,6 +25,18 @@ app.add_middleware(
     expose_headers=["*"]
 )
 
+# ==============================================================================
+# 💡 [조정 가능한 설정] - Wall/Object Estimation Parameters
+# ==============================================================================
+# 1. YOLOv8 객체 감지 민감도: 낮을수록 더 많은 객체를 감지 (0.01 ~ 1.0)
+YOLO_CONF_THRESHOLD = 0.15 
+# 2. 너무 작은 객체 박스 필터링 기준: 이 비율 미만은 무시 (0.01 ~ 0.1)
+MIN_BOX_RATIO = 0.02
+# 3. 마스크 후처리 시 사용할 모폴로지 커널 크기: 클수록 정제 효과가 강함 (3 ~ 15 홀수)
+MORPHOLOGY_KERNEL_SIZE = 9
+# 4. 최종 마스크 경계의 Gaussian Blur 크기: 클수록 경계가 더 부드러움 (5 ~ 15 홀수)
+GAUSSIAN_BLUR_SIZE = 11
+
 # 전역 변수
 det_model = None  # YOLOv8n (COCO general detection)
 sam_model = None  # MobileSAM
@@ -43,7 +55,7 @@ def load_models_on_startup():
     logger.info(f"[⚙️] Device: {device}")
     
     # Dockerfile에서 다운로드하는 파일명과 일치
-    yolo_checkpoint_path = "yolov8n.pt" 
+    yolo_checkpoint_path = "yolov8n.pt"  
     sam_checkpoint_path = "mobile_sam.pt"
 
     try:
@@ -72,23 +84,24 @@ def np_from_upload(file_bytes: bytes) -> Image.Image:
     return Image.open(io.BytesIO(file_bytes)).convert("RGB")
 
 
-def filter_small_boxes(boxes, img_shape, min_ratio=0.03):
-    """너무 작은 박스 필터링 (노이즈 제거)"""
+def filter_small_boxes(boxes, img_shape, min_ratio=MIN_BOX_RATIO):
+    """너무 작은 박스 필터링 (노이즈 제거). 조정 가능한 MIN_BOX_RATIO 사용"""
     H, W = img_shape
     area_img = H * W
     filtered = []
     for x1, y1, x2, y2 in boxes:
         area = (x2 - x1) * (y2 - y1)
-        # 면적이 전체 이미지의 3% 미만이면 필터링
+        # 면적이 전체 이미지의 min_ratio 미만이면 필터링
         if area / area_img > min_ratio:
             filtered.append([float(x1), float(y1), float(x2), float(y2)])
     return filtered
 
 
 def post_refine(mask: np.ndarray):
-    """마스크 후처리: 노이즈 제거, 확대, 가장 큰 연결 영역만 남기기 (벽 영역 추정)"""
+    """마스크 후처리: 노이즈 제거, 확대, 가장 큰 연결 영역만 남기기 (벽 영역 추정). MORPHOLOGY_KERNEL_SIZE 사용"""
     mask = mask.astype(np.uint8)
-    kernel = np.ones((7, 7), np.uint8)
+    # 💡 조정 가능한 커널 크기 적용
+    kernel = np.ones((MORPHOLOGY_KERNEL_SIZE, MORPHOLOGY_KERNEL_SIZE), np.uint8)
 
     # 노이즈 제거 (Opening) + 경계 채우기 (Dilate)
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=1)
@@ -110,7 +123,7 @@ def post_refine(mask: np.ndarray):
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "YOLOv8n + MobileSAM Wall Segmentation Server (Reverted)"}
+    return {"status": "ok", "message": "YOLOv8n + MobileSAM Wall Segmentation Server (Tuning Ready)"}
 
 
 @app.get("/health")
@@ -161,7 +174,7 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         logger.info("[🔍] YOLOv8n: 객체 감지 중...")
         results = det_model.predict(
             pil_img,
-            conf=0.20, # 충분히 낮은 confidence
+            conf=YOLO_CONF_THRESHOLD, # 💡 조정 가능한 CONF_THRESHOLD 적용
             imgsz=640,
             device=device,
             verbose=False,
@@ -169,7 +182,7 @@ async def segment_wall_mask(file: UploadFile = File(...)):
         )[0]
 
         xyxy = results.boxes.xyxy.cpu().numpy() if results.boxes is not None else []
-        boxes = filter_small_boxes(xyxy, pil_img.size[::-1])
+        boxes = filter_small_boxes(xyxy, pil_img.size[::-1]) # 💡 조정 가능한 MIN_BOX_RATIO 적용
         
         logger.info(f"[✅] {len(boxes)}개의 유효 객체 박스 발견")
 
@@ -199,12 +212,11 @@ async def segment_wall_mask(file: UploadFile = File(...)):
             union = (mask_data.sum(axis=0) > 0).astype(np.uint8)
             
             # 후처리 (가장 큰 연결 영역만 남김)
-            refined = post_refine(union)
+            refined = post_refine(union) # 💡 조정 가능한 MORPHOLOGY_KERNEL_SIZE 적용
             mask_img = (refined * 255).astype(np.uint8)
             
-            # 💡 경계면 부드럽게 처리 (Smoothing) - 커널 크기 증가 (9, 9)
-            # 마스크 경계를 더욱 부드럽게 만들기 위해 Gaussian Blur 커널 크기 증가
-            mask_img = cv2.GaussianBlur(mask_img, (9, 9), 0)
+            # 💡 경계면 부드럽게 처리 (Smoothing)
+            mask_img = cv2.GaussianBlur(mask_img, (GAUSSIAN_BLUR_SIZE, GAUSSIAN_BLUR_SIZE), 0) # 💡 조정 가능한 GAUSSIAN_BLUR_SIZE 적용
             
             del mask_data, union, refined
         

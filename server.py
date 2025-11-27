@@ -120,25 +120,25 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
         return None
 
     try:
-        # 🚨 [수정된 부분]: PIL Image를 NumPy 배열로 변환하고 0-1 사이로 정규화하여
-        # MiDaS 변환 로직에서 발생하는 "Image / float" 오류를 해결합니다.
+        # 🚨 [수정된 부분]: PIL Image를 NumPy 배열로 변환하여 MiDaS transform의 표준 입력인
+        # 딕셔너리 형태로 전달합니다. 정규화(나누기 255.0)는 MiDaS transform 내부에서
+        # 처리되도록 변경하여 연산자 오류(dict/float)를 방지합니다.
         
-        # 1. PIL Image를 NumPy 배열로 변환
-        img_np = np.array(pil_img).astype(np.float32)
-        # 2. 0-1 사이로 정규화 (MiDaS 모델의 입력 요구 사항)
-        img_normalized = img_np / 255.0
-        # 3. MiDaS transform의 입력으로 PyTorch 텐서가 아닌 NumPy 배열을 기대하므로,
-        # MiDaS transform의 내부 로직에 맞춰 딕셔너리 형태로 전달
-        input_data = midas_transform({"image": img_normalized})
+        # 1. PIL Image를 NumPy 배열로 변환 (0-255 범위 유지)
+        img_np = np.array(pil_img)
         
-        # 4. 입력 텐서를 디바이스로 이동
+        # 2. MiDaS transform의 입력: {"image": np.ndarray (0-255)}
+        # MiDaS transform이 내부적으로 정규화와 텐서 변환을 수행합니다.
+        input_data = midas_transform({"image": img_np})
+        
+        # 3. 입력 텐서를 디바이스로 이동
         input_batch = input_data["image"].unsqueeze(0).to(device)
         
         with torch.no_grad():
-            # 5. MiDaS 모델 실행
+            # 4. MiDaS 모델 실행
             prediction = midas_model(input_batch)
             
-            # 6. 출력 크기를 원본 이미지 크기에 맞게 조정
+            # 5. 출력 크기를 원본 이미지 크기에 맞게 조정
             prediction = torch.nn.functional.interpolate(
                 prediction.unsqueeze(1),
                 size=pil_img.size[::-1], # (H, W)
@@ -146,10 +146,10 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
                 align_corners=False,
             ).squeeze()
         
-        # 7. NumPy로 변환 및 정규화
+        # 6. NumPy로 변환 및 정규화
         depth_map = prediction.cpu().numpy()
         
-        # 8. 깊이 맵을 0-255 스케일로 정규화 (Occlusion Mask 생성에 활용하기 위함)
+        # 7. 깊이 맵을 0-255 스케일로 정규화 (Occlusion Mask 생성에 활용하기 위함)
         depth_min = depth_map.min()
         depth_max = depth_map.max()
         

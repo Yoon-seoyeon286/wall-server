@@ -7,9 +7,8 @@ import gc
 import logging
 from PIL import Image
 from ultralytics import YOLO, SAM
-from fastapi import FastAPI, File, UploadFile, Response, Form
+from fastapi import FastAPI, File, UploadFile, Response
 from fastapi.middleware.cors import CORSMiddleware
-import torch.hub
 import psutil # 메모리 사용량 추적을 위해 추가
 
 # 로깅 설정
@@ -38,24 +37,20 @@ MORPHOLOGY_KERNEL_SIZE = 9
 # 4. 최종 마스크 경계의 Gaussian Blur 크기: 클수록 경계가 더 부드러움 
 GAUSSIAN_BLUR_SIZE = 13
 # 5. 깊이 맵 기반 객체 제거 민감도: 이 값보다 깊이 차이가 크면 객체로 간주 (낮을수록 민감)
-DEPTH_DIFF_THRESHOLD = 10 
+# Unity의 깊이 맵은 MiDaS보다 선명하여 임계값을 더 낮게 설정할 수 있습니다.
+DEPTH_DIFF_THRESHOLD = 5 
 
 # 전역 변수
 det_model = None  # YOLOv8s
 sam_model = None  # MobileSAM
-midas_model = None # MiDaS for Monocular Depth Estimation
 device = "cpu"
-
-# MiDaS v2.1 Small 모델의 표준 전처리 값
-MIDAS_MEAN = torch.tensor([0.5, 0.5, 0.5]).float()
-MIDAS_STD = torch.tensor([0.5, 0.5, 0.5]).float()
 
 @app.on_event("startup")
 def load_models_on_startup():
-    """서버 시작 시 YOLOv8s + MobileSAM + MiDaS 로드"""
-    global det_model, sam_model, midas_model, device
+    """서버 시작 시 YOLOv8s + MobileSAM 로드 (MiDaS 제거)"""
+    global det_model, sam_model, device
     
-    logger.info("[🔥] Starting model loading for YOLOv8s + MobileSAM + MiDaS (MiDaS_v21_small)...")
+    logger.info("[🔥] Starting model loading for YOLOv8s + MobileSAM (MiDaS Removed)...")
     
     # CPU 환경 설정
     device = "cpu"
@@ -81,19 +76,10 @@ def load_models_on_startup():
             sam_model.to(device)
             logger.info("[✅] MobileSAM loaded.")
             
-        # 3. MiDaS 모델 로드 (MiDaS_v21_small 복원)
-        midas_type = "MiDaS_v21_small" 
-        midas_model = torch.hub.load("intel-isl/MiDaS", midas_type, trust_repo=True, map_location=device)
-        midas_model.to(device)
-        midas_model.eval()
-        
-        logger.info(f"[✅] MiDaS ({midas_type}) loaded on CPU. (Warning: Potential memory issue)")
+        logger.info("[✅] MiDaS 깊이 모델은 메모리 문제로 인해 제거되었으며, Unity 깊이 데이터만 사용합니다.")
 
     except Exception as e:
         logger.error(f"[❌] FATAL Model loading failed: {e}", exc_info=True)
-        midas_model = None
-        # 메모리 문제를 일으킨 MiDaS 대신, 최소한의 기능은 제공하도록 MiDaS를 None으로 설정
-        logger.warning("MiDaS load failed. Segmentation will proceed without depth correction.")
 
 
 def np_from_upload(file_bytes: bytes, mode="RGB") -> Image.Image:
@@ -102,74 +88,6 @@ def np_from_upload(file_bytes: bytes, mode="RGB") -> Image.Image:
         return Image.open(io.BytesIO(file_bytes)).convert(mode)
     except Exception as e:
         logger.error(f"Failed to open image from bytes: {e}")
-        return None
-
-# ==============================================================================
-# --- MiDaS 깊이 맵 생성 함수 ---
-# ==============================================================================
-def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.ndarray:
-    """
-    MiDaS 모델을 사용하여 RGB 이미지로부터 깊이 맵을 추정합니다.
-    [수동 전처리]: 오류를 회피하기 위해 transform 대신 수동으로 전처리합니다.
-    """
-    if midas_model is None:
-        logger.error("MiDaS model not initialized.")
-        return None
-
-    try:
-        # 1. NumPy 배열로 변환 및 정규화
-        img_np = np.array(pil_img) # H, W, 3 (uint8)
-        img_float = img_np.astype(np.float32) / 255.0 # H, W, 3 (float 0-1)
-        
-        # 2. PyTorch 텐서로 변환 및 차원 변경 (H, W, C -> C, H, W)
-        tensor = torch.from_numpy(img_float).permute(2, 0, 1) # 3, H, W
-        
-        # 3. MiDaS 표준 정규화 적용 (Mean and Std)
-        for i in range(3):
-            tensor[i].sub_(MIDAS_MEAN[i]).div_(MIDAS_STD[i])
-
-        
-        # 4. 배치 차원 추가 및 디바이스 이동
-        input_batch = tensor.unsqueeze(0).to(device) # 1, 3, H, W
-        del tensor # 🚨 메모리 해제
-        
-        with torch.no_grad():
-            # 5. MiDaS 모델 실행
-            prediction = midas_model(input_batch)
-            del input_batch # 🚨 메모리 해제
-            
-            # 6. 출력 크기를 원본 이미지 크기에 맞게 조정
-            prediction = torch.nn.functional.interpolate(
-                prediction.unsqueeze(1),
-                size=pil_img.size[::-1], # (H, W)
-                mode="bicubic",
-                align_corners=False,
-            ).squeeze()
-        
-        # 7. NumPy로 변환 및 정규화
-        depth_map = prediction.cpu().numpy()
-        del prediction # 🚨 메모리 해제
-        
-        # 8. 깊이 맵을 0-255 스케일로 정규화
-        depth_min = depth_map.min()
-        depth_max = depth_map.max()
-        depth_range = depth_max - depth_min
-        
-        if depth_range > 0:
-            # 반전된 깊이 (가까울수록 밝게)
-            normalized_depth = (depth_map - depth_min) / depth_range
-            normalized_depth = 1.0 - normalized_depth 
-        else:
-            normalized_depth = np.zeros_like(depth_map, dtype=np.float32)
-
-        # 0-255 범위의 8비트 정수형으로 변환
-        normalized_depth_uint8 = (normalized_depth * 255).astype(np.uint8)
-        
-        logger.info("[✅] MiDaS (MiDaS_v21_small) 깊이 맵 생성 완료.")
-        return normalized_depth_uint8
-
-    except Exception as e:
-        logger.error(f"MiDaS depth generation failed: {e}", exc_info=True)
         return None
 
 
@@ -211,15 +129,18 @@ def post_refine(mask: np.ndarray):
 
 def create_depth_occlusion_mask(depth_map: np.ndarray, threshold=DEPTH_DIFF_THRESHOLD) -> np.ndarray:
     """
-    깊이 지도를 사용하여 전경 객체(Occlusion) 마스크 생성.
+    Unity 깊이 지도를 사용하여 전경 객체(Occlusion) 마스크 생성.
     인접 픽셀 간의 급격한 깊이 변화(경계)를 찾아 객체를 분리합니다.
+    (MiDaS 대신 이 코드를 사용하여 Unity Depth를 처리합니다)
     """
     if depth_map is None:
         return None
         
+    # 깊이 맵은 0-255 스케일의 흑백 이미지로 가정합니다.
     depth_map = depth_map.astype(np.float32)
     
     # Sobel 필터를 사용하여 깊이 맵의 경계(깊이 변화가 큰 부분)를 검출
+    # cv2.CV_32F는 부동소수점 출력을 보장합니다.
     grad_x = cv2.Sobel(depth_map, cv2.CV_32F, 1, 0, ksize=3)
     grad_y = cv2.Sobel(depth_map, cv2.CV_32F, 0, 1, ksize=3)
     
@@ -228,6 +149,7 @@ def create_depth_occlusion_mask(depth_map: np.ndarray, threshold=DEPTH_DIFF_THRE
     del grad_x, grad_y # 🚨 메모리 해제
     
     # 임계값 이상의 경계만 마스킹 (객체 = 1, 배경 = 0)
+    # 임계값 DEPTH_DIFF_THRESHOLD는 설정 섹션에서 조정 가능합니다.
     occlusion_mask = (magnitude > threshold).astype(np.uint8)
     del magnitude # 🚨 메모리 해제
     
@@ -235,12 +157,13 @@ def create_depth_occlusion_mask(depth_map: np.ndarray, threshold=DEPTH_DIFF_THRE
     kernel = np.ones((5, 5), np.uint8)
     occlusion_mask = cv2.dilate(occlusion_mask, kernel, iterations=2)
     
+    logger.info(f"[✅] Unity 깊이 데이터로 전경 객체 마스크 생성 완료 (Threshold: {threshold}).")
     return occlusion_mask
 
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "YOLOv8s + MobileSAM + MiDaS_v21_small Integrated Server"}
+    return {"status": "ok", "message": "YOLOv8s + MobileSAM + Unity Depth Integration Server"}
 
 
 @app.get("/health")
@@ -252,8 +175,7 @@ async def health():
     
     return {
         "status": "healthy",
-        # MiDaS_v21_small 로딩 여부 확인
-        "models_loaded": det_model is not None and sam_model is not None and midas_model is not None, 
+        "models_loaded": det_model is not None and sam_model is not None,
         "device": device,
         "memory_mb": round(memory_mb, 2)
     }
@@ -264,7 +186,7 @@ async def segment_wall_mask(
     rgb_file: UploadFile = File(..., alias="rgb_file"), # 유니티 카메라 이미지
     depth_file: UploadFile = File(..., alias="depth_file") # 유니티 깊이 지도 (흑백 PNG 가정)
 ):
-    """YOLOv8s+SAM으로 객체 감지/분할 후, MiDaS 또는 실제 깊이 지도로 최종 가려짐 마스크를 적용하여 벽 영역 추출"""
+    """YOLOv8s+SAM으로 객체 감지/분할 후, Unity 깊이 지도로 최종 가려짐 마스크를 적용하여 벽 영역 추출"""
     
     process = psutil.Process()
     initial_memory = process.memory_info().rss / 1024 / 1024
@@ -293,30 +215,31 @@ async def segment_wall_mask(
         if max(pil_img.size) > max_size:
             ratio = max_size / max(pil_img.size)
             new_size = tuple(int(dim * ratio) for dim in pil_img.size)
-            # PIL Image.resize는 새 이미지를 반환하므로 이전 pil_img는 GC 대상이 됨
             pil_img = pil_img.resize(new_size, Image.LANCZOS) 
 
         w, h = pil_img.size
         logger.info(f"[📸] RGB 이미지: {w}x{h}")
         
-        # 2. 깊이 지도 로드 및 MiDaS 폴백 적용
+        
+        # 2. Unity 깊이 지도 로드 (MiDaS 폴백 없음)
         depth_bytes = await depth_file.read()
         
-        # 클라이언트 깊이 데이터 유효성 검사
-        if depth_bytes and len(depth_bytes) > 100: 
-            depth_img = np_from_upload(depth_bytes, mode="L")
+        if not depth_bytes or len(depth_bytes) <= 100: 
+            logger.warning("[❌] 클라이언트 깊이 파일이 비어 있거나 유효하지 않습니다. 2D AI 마스크만 사용합니다.")
+            depth_img_np = None # 깊이 보정 기능을 사용하지 않음
+        else:
+            depth_img = np_from_upload(depth_bytes, mode="L") # 흑백(L)로 로드
             if depth_img is not None:
+                # RGB 이미지 크기에 맞춰 깊이 맵 리사이즈
                 depth_img_np = np.array(depth_img.resize((w, h), Image.NEAREST))
                 del depth_img
                 logger.info("[✅] 클라이언트 깊이 지도 로드 완료.")
             else:
-                logger.warning("[⚠️] 클라이언트 깊이 데이터 로드 실패. MiDaS로 대체합니다.")
-                depth_img_np = generate_depth_map_midas(pil_img, (w, h))
-        else:
-            logger.warning("[⚠️] 클라이언트 깊이 파일이 비어 있습니다. MiDaS로 깊이 맵을 생성합니다.")
-            depth_img_np = generate_depth_map_midas(pil_img, (w, h))
+                logger.warning("[❌] 클라이언트 깊이 데이터 로드 실패. 2D AI 마스크만 사용합니다.")
+                depth_img_np = None
         
         del depth_bytes # 🚨 메모리 해제
+
 
         # 3. YOLOv8s + MobileSAM으로 초기 벽 마스크 생성
         logger.info("[🔍] YOLOv8s: 객체 감지 중...")
@@ -368,6 +291,7 @@ async def segment_wall_mask(
         final_mask_img = initial_wall_mask.copy()
         del initial_wall_mask
         
+        # MiDaS 없이, 오직 Unity 클라이언트 깊이 맵이 있을 때만 보정 진행
         if depth_img_np is not None:
             depth_occlusion_mask = create_depth_occlusion_mask(depth_img_np)
             del depth_img_np # 🚨 메모리 해제
@@ -382,11 +306,11 @@ async def segment_wall_mask(
                 final_mask_img = combined_mask
                 del wall_from_depth, combined_mask
                 
-                logger.info("[✅] 깊이 데이터(클라이언트 or MiDaS)로 최종 가려짐 보정 완료.")
+                logger.info("[✅] Unity 클라이언트 깊이 데이터로 최종 가려짐 보정 완료.")
             else:
                 logger.warning("[⚠️] 깊이 마스크 생성 실패. 2D AI 마스크만 사용합니다.")
         else:
-            logger.warning("[⚠️] 깊이 데이터가 없어 2D AI 마스크만 사용합니다.")
+            logger.warning("[⚠️] 깊이 데이터가 유효하지 않아 2D AI 마스크만 사용합니다.")
 
         # 5. 최종 마스크 정리 및 인코딩
         

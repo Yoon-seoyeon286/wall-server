@@ -30,7 +30,7 @@ app.add_middleware(
 # 💡 [조정 가능한 설정] - Wall/Object Estimation Parameters
 # ==============================================================================
 # 1. YOLOv8 객체 감지 민감도
-YOLO_CONF_THRESHOLD = 0.001 
+YOLO_CONF_THRESHOLD = 0.001
 # 2. 너무 작은 객체 박스 필터링 기준
 MIN_BOX_RATIO = 0.003
 # 3. 마스크 후처리 시 사용할 모폴로지 커널 크기

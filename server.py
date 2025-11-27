@@ -28,64 +28,69 @@ app.add_middleware(
 # ==============================================================================
 # 💡 [조정 가능한 설정] - Wall/Object Estimation Parameters
 # ==============================================================================
-YOLO_CONF_THRESHOLD = 0.001  # YOLOv8 객체 감지 민감도
-MIN_BOX_RATIO = 0.003  # 너무 작은 객체 박스 필터링 기준
-MORPHOLOGY_KERNEL_SIZE = 11  # 마스크 후처리 시 사용할 모폴로지 커널 크기
-GAUSSIAN_BLUR_SIZE = 21  # 최종 마스크 경계의 Gaussian Blur 크기
-DEPTH_DIFF_THRESHOLD = 8  # 깊이 맵 기반 객체 제거 민감도
-MAX_IMAGE_SIZE_PIXELS = 640  # 메모리 보호를 위한 최대 이미지 크기 제한
+YOLO_CONF_THRESHOLD = 0.001  # YOLO 객체 감지 민감도
+MIN_BOX_RATIO = 0.003  # 너무 작은 박스 제외
+MORPHOLOGY_KERNEL_SIZE = 11  # 노이즈 제거 & 연결부 강화
+GAUSSIAN_BLUR_SIZE = 21  # 경계 연화
+DEPTH_DIFF_THRESHOLD = 8  # 깊이 경계 민감도
+MAX_IMAGE_SIZE_PIXELS = 640
+TOP_BOTTOM_REMOVE_RATIO = 0.15  # 천장/바닥 제거 비율
 
 # 전역 변수
-det_model = None  # YOLOv8s
-sam_model = None  # MobileSAM
+det_model = None
+sam_model = None
 device = "cpu"
 
 
+# ==============================================================================
+# 📌 모델 로드
+# ==============================================================================
 @app.on_event("startup")
 def load_models_on_startup():
-    """서버 시작 시 YOLOv8s + MobileSAM 로드 (MiDaS 제거)"""
     global det_model, sam_model, device
 
-    logger.info("[🔥] Starting model loading for YOLOv8s + MobileSAM (MiDaS Removed)...")
-
+    logger.info("[🔥] Loading YOLOv8s + MobileSAM (no MiDaS)...")
     device = "cpu"
-    logger.info(f"[⚙️] Device: {device}")
 
     yolo_checkpoint_path = "yolov8s.pt"
     sam_checkpoint_path = "mobile_sam.pt"
 
     try:
-        if not os.path.exists(yolo_checkpoint_path):
-            logger.error(f"[❌] YOLOv8s checkpoint not found at: {yolo_checkpoint_path}")
-        else:
+        if os.path.exists(yolo_checkpoint_path):
             det_model = YOLO(yolo_checkpoint_path)
             det_model.to(device)
-            logger.info("[✅] YOLOv8s loaded.")
-
-        if not os.path.exists(sam_checkpoint_path):
-            logger.error(f"[❌] MobileSAM checkpoint not found at: {sam_checkpoint_path}")
+            logger.info("[✅] YOLOv8s Loaded.")
         else:
+            logger.error(f"[❌] Not found: {yolo_checkpoint_path}")
+
+        if os.path.exists(sam_checkpoint_path):
             sam_model = SAM(sam_checkpoint_path)
             sam_model.to(device)
-            logger.info("[✅] MobileSAM loaded.")
+            logger.info("[✅] MobileSAM Loaded.")
+        else:
+            logger.error(f"[❌] Not found: {sam_checkpoint_path}")
 
-        logger.info("[ℹ️] MiDaS 깊이 모델 제거됨 (Unity 깊이 데이터만 사용).")
+        logger.info("[ℹ️] MiDaS removed (using Unity Depth only).")
 
     except Exception as e:
-        logger.error(f"[❌] FATAL Model loading failed: {e}", exc_info=True)
+        logger.error(f"[❌] Model loading failed: {e}", exc_info=True)
 
 
+# ==============================================================================
+# 📌 Utility : 이미지 로드
+# ==============================================================================
 def np_from_upload(file_bytes: bytes, mode="RGB") -> Image.Image:
-    """바이트를 PIL Image로 변환"""
     try:
         return Image.open(io.BytesIO(file_bytes)).convert(mode)
     except Exception as e:
-        logger.error(f"Failed to open image from bytes: {e}")
+        logger.error(f"Failed to open image: {e}")
         return None
 
 
+# ==============================================================================
+# 🧹 작은 박스 제거
+# ==============================================================================
 def filter_small_boxes(boxes, img_shape, min_ratio=MIN_BOX_RATIO):
-    """너무 작은 박스 필터링 (노이즈 제거)."""
     H, W = img_shape
     area_img = H * W
     filtered = []
@@ -96,8 +101,10 @@ def filter_small_boxes(boxes, img_shape, min_ratio=MIN_BOX_RATIO):
     return filtered
 
 
+# ==============================================================================
+# 🧱 마스크 후처리 (노이즈 제거 + 가장 큰 영역 유지)
+# ==============================================================================
 def post_refine(mask: np.ndarray):
-    """마스크 후처리: 노이즈 제거, 확대, 가장 큰 연결 영역만 남기기 (벽 영역 추정)."""
     mask = mask.astype(np.uint8)
     kernel = np.ones((MORPHOLOGY_KERNEL_SIZE, MORPHOLOGY_KERNEL_SIZE), np.uint8)
 
@@ -116,8 +123,10 @@ def post_refine(mask: np.ndarray):
     return clean
 
 
+# ==============================================================================
+# ⛓ 깊이 기반 전경 제거 (Occlusion)
+# ==============================================================================
 def create_depth_occlusion_mask(depth_map: np.ndarray, threshold=DEPTH_DIFF_THRESHOLD) -> np.ndarray:
-    """Unity 깊이 지도를 사용하여 전경 객체(Occlusion) 마스크 생성."""
     if depth_map is None:
         return None
 
@@ -127,28 +136,56 @@ def create_depth_occlusion_mask(depth_map: np.ndarray, threshold=DEPTH_DIFF_THRE
     grad_y = cv2.Sobel(depth_map, cv2.CV_32F, 0, 1, ksize=3)
 
     magnitude = cv2.magnitude(grad_x, grad_y)
-    del grad_x, grad_y
-
     occlusion_mask = (magnitude > threshold).astype(np.uint8)
-    del magnitude
 
     kernel = np.ones((5, 5), np.uint8)
     occlusion_mask = cv2.dilate(occlusion_mask, kernel, iterations=2)
 
-    logger.info(f"[✅] Unity 깊이 데이터로 전경 객체 마스크 생성 완료 (Threshold: {threshold}).")
+    logger.info("[🧱] Occlusion Mask Created.")
     return occlusion_mask
 
 
+# ==============================================================================
+# 🪓 천장 + 바닥 제거
+# ==============================================================================
+def remove_top_bottom(mask, ratio=TOP_BOTTOM_REMOVE_RATIO):
+    h = mask.shape[0]
+    cut = int(h * ratio)
+
+    mask[:cut, :] = 0   # 천장 제거
+    mask[h-cut:, :] = 0  # 바닥 제거
+    return mask
+
+
+# ==============================================================================
+# 🧱 수직 면만 남기기
+# ==============================================================================
+def filter_vertical_surfaces(depth_map, threshold=DEPTH_DIFF_THRESHOLD):
+    depth_map = depth_map.astype(np.float32)
+    dx = cv2.Sobel(depth_map, cv2.CV_32F, 1, 0, ksize=3)
+    dy = cv2.Sobel(depth_map, cv2.CV_32F, 0, 1, ksize=3)
+
+    magnitude = cv2.magnitude(dx, dy)
+    direction_mask = (dy > dx).astype(np.uint8)
+    strong_edges = (magnitude > threshold).astype(np.uint8)
+    vertical_mask = strong_edges * direction_mask
+
+    kernel = np.ones((5, 5), np.uint8)
+    return cv2.dilate(vertical_mask, kernel, iterations=2)
+
+
+# ==============================================================================
+# 🧾 서버 상태
+# ==============================================================================
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "YOLOv8s + MobileSAM + Unity Depth Integration Server"}
+    return {"status": "ok", "message": "Wall Detection Server"}
 
 
 @app.get("/health")
 async def health():
     process = psutil.Process()
     memory_mb = process.memory_info().rss / 1024 / 1024
-
     gc.collect()
 
     return {

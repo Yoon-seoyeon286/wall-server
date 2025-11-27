@@ -6,3 +6,4 @@ opencv-python==4.9.0.80
 python-multipart==0.0.9
 psutil==5.9.8
 starlette==0.37.2
+ultralytics==8.2.0

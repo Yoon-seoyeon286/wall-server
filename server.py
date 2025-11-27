@@ -37,7 +37,7 @@ MIN_BOX_RATIO = 0.005
 MORPHOLOGY_KERNEL_SIZE = 9
 # 4. 최종 마스크 경계의 Gaussian Blur 크기: 클수록 경계가 더 부드러움 
 GAUSSIAN_BLUR_SIZE = 13
-# 5. 깊이 맵 기반 객체 제거 민감도: 이 값보다 깊이 차이가 크면 객체로 간주 (낮출수록 민감)
+# 5. 깊이 맵 기반 객체 제거 민감도: 이 값보다 깊이 차이가 크면 객체로 간주 (낮을수록 민감)
 DEPTH_DIFF_THRESHOLD = 10 
 
 # 전역 변수
@@ -46,7 +46,7 @@ sam_model = None  # MobileSAM
 midas_model = None # MiDaS for Monocular Depth Estimation
 device = "cpu"
 
-# MiDaS DPT_Hybrid_Small 모델의 표준 전처리 값 (MiDaS v2.1 Small과 동일)
+# MiDaS v2.1 Small 모델의 표준 전처리 값
 MIDAS_MEAN = torch.tensor([0.5, 0.5, 0.5]).float()
 MIDAS_STD = torch.tensor([0.5, 0.5, 0.5]).float()
 
@@ -55,7 +55,7 @@ def load_models_on_startup():
     """서버 시작 시 YOLOv8s + MobileSAM + MiDaS 로드"""
     global det_model, sam_model, midas_model, device
     
-    logger.info("[🔥] Starting model loading for YOLOv8s + MobileSAM + MiDaS...")
+    logger.info("[🔥] Starting model loading for YOLOv8s + MobileSAM + MiDaS (MiDaS_v21_small)...")
     
     # CPU 환경 설정
     device = "cpu"
@@ -81,17 +81,19 @@ def load_models_on_startup():
             sam_model.to(device)
             logger.info("[✅] MobileSAM loaded.")
             
-        # 3. MiDaS 모델 로드 (최소형 모델 DPT_Hybrid_Small로 변경)
-        midas_type = "DPT_Hybrid_Small" 
+        # 3. MiDaS 모델 로드 (MiDaS_v21_small 복원)
+        midas_type = "MiDaS_v21_small" 
         midas_model = torch.hub.load("intel-isl/MiDaS", midas_type, trust_repo=True, map_location=device)
         midas_model.to(device)
         midas_model.eval()
         
-        logger.info(f"[✅] MiDaS ({midas_type}) loaded on CPU. (최소 메모리 모델)")
+        logger.info(f"[✅] MiDaS ({midas_type}) loaded on CPU. (Warning: Potential memory issue)")
 
     except Exception as e:
         logger.error(f"[❌] FATAL Model loading failed: {e}", exc_info=True)
         midas_model = None
+        # 메모리 문제를 일으킨 MiDaS 대신, 최소한의 기능은 제공하도록 MiDaS를 None으로 설정
+        logger.warning("MiDaS load failed. Segmentation will proceed without depth correction.")
 
 
 def np_from_upload(file_bytes: bytes, mode="RGB") -> Image.Image:
@@ -154,14 +156,16 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
         depth_range = depth_max - depth_min
         
         if depth_range > 0:
+            # 반전된 깊이 (가까울수록 밝게)
             normalized_depth = (depth_map - depth_min) / depth_range
+            normalized_depth = 1.0 - normalized_depth 
         else:
             normalized_depth = np.zeros_like(depth_map, dtype=np.float32)
 
         # 0-255 범위의 8비트 정수형으로 변환
         normalized_depth_uint8 = (normalized_depth * 255).astype(np.uint8)
         
-        logger.info("[✅] MiDaS (DPT_Hybrid_Small) 깊이 맵 생성 완료.")
+        logger.info("[✅] MiDaS (MiDaS_v21_small) 깊이 맵 생성 완료.")
         return normalized_depth_uint8
 
     except Exception as e:
@@ -236,7 +240,7 @@ def create_depth_occlusion_mask(depth_map: np.ndarray, threshold=DEPTH_DIFF_THRE
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "YOLOv8s + MobileSAM + DPT_Hybrid_Small Integrated Server"}
+    return {"status": "ok", "message": "YOLOv8s + MobileSAM + MiDaS_v21_small Integrated Server"}
 
 
 @app.get("/health")
@@ -248,7 +252,8 @@ async def health():
     
     return {
         "status": "healthy",
-        "models_loaded": det_model is not None and sam_model is not None and midas_model is not None,
+        # MiDaS_v21_small 로딩 여부 확인
+        "models_loaded": det_model is not None and sam_model is not None and midas_model is not None, 
         "device": device,
         "memory_mb": round(memory_mb, 2)
     }
@@ -266,8 +271,8 @@ async def segment_wall_mask(
     logger.info(f"[🧠] 요청 시작 메모리: {initial_memory:.2f} MB")
     
     # 모델 로딩 여부 확인
-    if det_model is None or sam_model is None or midas_model is None:
-        logger.error("Segmentation services are unavailable due to model loading failure or MiDaS initialization failure.")
+    if det_model is None or sam_model is None:
+        logger.error("Segmentation services are unavailable due to model loading failure.")
         return Response(content="Model load failed. Check server startup logs.", status_code=503)
 
     pil_img = depth_img_np = depth_occlusion_mask = None 

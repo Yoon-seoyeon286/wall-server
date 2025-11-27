@@ -46,7 +46,7 @@ sam_model = None  # MobileSAM
 midas_model = None # MiDaS for Monocular Depth Estimation
 device = "cpu"
 
-# MiDaS v2.1 Small의 표준 전처리 값
+# MiDaS DPT_Hybrid_Small 모델의 표준 전처리 값 (MiDaS v2.1 Small과 동일)
 MIDAS_MEAN = torch.tensor([0.5, 0.5, 0.5]).float()
 MIDAS_STD = torch.tensor([0.5, 0.5, 0.5]).float()
 
@@ -81,17 +81,16 @@ def load_models_on_startup():
             sam_model.to(device)
             logger.info("[✅] MobileSAM loaded.")
             
-        # 3. MiDaS 모델 로드 (MiDaS_v21_small로 교체하여 안정성 확보)
-        midas_type = "MiDaS_v21_small" 
+        # 3. MiDaS 모델 로드 (최소형 모델 DPT_Hybrid_Small로 변경)
+        midas_type = "DPT_Hybrid_Small" 
         midas_model = torch.hub.load("intel-isl/MiDaS", midas_type, trust_repo=True, map_location=device)
         midas_model.to(device)
         midas_model.eval()
         
-        logger.info(f"[✅] MiDaS ({midas_type}) loaded on CPU.")
+        logger.info(f"[✅] MiDaS ({midas_type}) loaded on CPU. (최소 메모리 모델)")
 
     except Exception as e:
         logger.error(f"[❌] FATAL Model loading failed: {e}", exc_info=True)
-        # MiDaS 로딩 실패 시에도 서버가 완전히 다운되지 않도록 처리
         midas_model = None
 
 
@@ -162,7 +161,7 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
         # 0-255 범위의 8비트 정수형으로 변환
         normalized_depth_uint8 = (normalized_depth * 255).astype(np.uint8)
         
-        logger.info("[✅] MiDaS (v21_small, 수동 전처리) 깊이 맵 생성 완료.")
+        logger.info("[✅] MiDaS (DPT_Hybrid_Small) 깊이 맵 생성 완료.")
         return normalized_depth_uint8
 
     except Exception as e:
@@ -237,7 +236,7 @@ def create_depth_occlusion_mask(depth_map: np.ndarray, threshold=DEPTH_DIFF_THRE
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "YOLOv8s + MobileSAM + MiDaS_v21_small Integrated Server"}
+    return {"status": "ok", "message": "YOLOv8s + MobileSAM + DPT_Hybrid_Small Integrated Server"}
 
 
 @app.get("/health")

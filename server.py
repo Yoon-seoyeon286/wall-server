@@ -44,14 +44,12 @@ DEPTH_DIFF_THRESHOLD = 10
 det_model = None  # YOLOv8s
 sam_model = None  # MobileSAM
 midas_model = None # MiDaS for Monocular Depth Estimation
-# midas_transform = None # 더 이상 사용하지 않음
 device = "cpu"
 
-# MiDaS 모델의 전처리에 필요한 값 (MiDaS_small 기준)
-# 픽셀 값에 더하거나 빼는 평균 값 (RGB 순서)
-MIDAS_MEAN = torch.tensor([0.485, 0.456, 0.406]).float()
-# 픽셀 값을 나누는 표준 편차 값 (RGB 순서)
-MIDAS_STD = torch.tensor([0.229, 0.224, 0.225]).float()
+# 🚨 MiDaS v2.1 Small의 표준 전처리 값으로 변경 (0.5, 0.5, 0.5)
+# MiDaS Transform을 우회하고 수동 전처리를 위해 사용
+MIDAS_MEAN = torch.tensor([0.5, 0.5, 0.5]).float()
+MIDAS_STD = torch.tensor([0.5, 0.5, 0.5]).float()
 
 @app.on_event("startup")
 def load_models_on_startup():
@@ -72,7 +70,6 @@ def load_models_on_startup():
         if not os.path.exists(yolo_checkpoint_path):
              logger.error(f"[❌] YOLOv8s checkpoint not found at: {yolo_checkpoint_path}")
         else:
-            # CPU에서만 실행되도록 map_location 설정
             det_model = YOLO(yolo_checkpoint_path)
             det_model.to(device)
             logger.info("[✅] YOLOv8s loaded.")
@@ -81,24 +78,23 @@ def load_models_on_startup():
         if not os.path.exists(sam_checkpoint_path):
              logger.error(f"[❌] MobileSAM checkpoint not found at: {sam_checkpoint_path}")
         else:
-            # CPU에서만 실행되도록 map_location 설정
             sam_model = SAM(sam_checkpoint_path)
             sam_model.to(device)
             logger.info("[✅] MobileSAM loaded.")
             
-        # 3. MiDaS 모델 로드 (가장 가벼운 midas_small로 복구)
-        midas_type = "MiDaS_small" # <-- 가장 안정적인 모델로 복구
-        # CPU에서만 실행되도록 map_location 설정
+        # 3. MiDaS 모델 로드 (MiDaS_v21_small로 교체하여 안정성 확보)
+        # 🚨 이 부분이 importlib 오류를 일으킨 주요 원인일 수 있습니다.
+        midas_type = "MiDaS_v21_small" 
         midas_model = torch.hub.load("intel-isl/MiDaS", midas_type, trust_repo=True, map_location=device)
         midas_model.to(device)
         midas_model.eval()
         
-        # MiDaS transforms 모듈은 이제 사용하지 않습니다.
-
         logger.info(f"[✅] MiDaS ({midas_type}) loaded on CPU.")
 
     except Exception as e:
         logger.error(f"[❌] FATAL Model loading failed: {e}", exc_info=True)
+        # MiDaS 로딩 실패 시에도 서버가 완전히 다운되지 않도록 처리
+        midas_model = None
 
 
 def np_from_upload(file_bytes: bytes, mode="RGB") -> Image.Image:
@@ -122,30 +118,29 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
         return None
 
     try:
-        # 1. 이미지 크기 조정 (MiDaS_small의 일반적인 입력 크기: 256x256)
-        # MiDaS_small은 크기 조정 대신 특정 비율에 맞춰 이미지 크기를 조정합니다.
-        # 여기서는 가장 간단한 방법인 원본 PIL Image를 그대로 변환합니다.
-        
-        # 2. NumPy 배열로 변환 및 정규화
+        # 1. NumPy 배열로 변환 및 정규화
         img_np = np.array(pil_img) # H, W, 3 (uint8)
         img_float = img_np.astype(np.float32) / 255.0 # H, W, 3 (float 0-1)
         
-        # 3. PyTorch 텐서로 변환 및 차원 변경 (H, W, C -> C, H, W)
+        # 2. PyTorch 텐서로 변환 및 차원 변경 (H, W, C -> C, H, W)
         tensor = torch.from_numpy(img_float).permute(2, 0, 1) # 3, H, W
         
-        # 4. MiDaS 표준 정규화 적용 (Mean and Std)
+        # 3. MiDaS 표준 정규화 적용 (Mean and Std)
         # MiDaS Transform에서 하던 정규화 작업을 수동으로 수행합니다.
-        for t, m, s in zip(tensor, MIDAS_MEAN, MIDAS_STD):
-            t.sub_(m).div_(s)
+        # tensor = (tensor - MIDAS_MEAN[:, None, None]) / MIDAS_STD[:, None, None]
+        # 위 코드 대신 zip을 사용해 딕셔너리 연산자 오류를 완벽하게 방지
+        for i in range(3):
+            tensor[i].sub_(MIDAS_MEAN[i]).div_(MIDAS_STD[i])
+
         
-        # 5. 배치 차원 추가 및 디바이스 이동
+        # 4. 배치 차원 추가 및 디바이스 이동
         input_batch = tensor.unsqueeze(0).to(device) # 1, 3, H, W
         
         with torch.no_grad():
-            # 6. MiDaS 모델 실행
+            # 5. MiDaS 모델 실행
             prediction = midas_model(input_batch)
             
-            # 7. 출력 크기를 원본 이미지 크기에 맞게 조정
+            # 6. 출력 크기를 원본 이미지 크기에 맞게 조정
             prediction = torch.nn.functional.interpolate(
                 prediction.unsqueeze(1),
                 size=pil_img.size[::-1], # (H, W)
@@ -153,10 +148,10 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
                 align_corners=False,
             ).squeeze()
         
-        # 8. NumPy로 변환 및 정규화
+        # 7. NumPy로 변환 및 정규화
         depth_map = prediction.cpu().numpy()
         
-        # 9. 깊이 맵을 0-255 스케일로 정규화
+        # 8. 깊이 맵을 0-255 스케일로 정규화
         depth_min = depth_map.min()
         depth_max = depth_map.max()
         depth_range = depth_max - depth_min
@@ -169,7 +164,7 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
         # 0-255 범위의 8비트 정수형으로 변환
         normalized_depth_uint8 = (normalized_depth * 255).astype(np.uint8)
         
-        logger.info("[✅] MiDaS (수동 전처리) 깊이 맵 생성 완료.")
+        logger.info("[✅] MiDaS (v21_small, 수동 전처리) 깊이 맵 생성 완료.")
         return normalized_depth_uint8
 
     except Exception as e:
@@ -242,7 +237,7 @@ def create_depth_occlusion_mask(depth_map: np.ndarray, threshold=DEPTH_DIFF_THRE
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "YOLOv8s + MobileSAM + MiDaS_small Integrated Server"}
+    return {"status": "ok", "message": "YOLOv8s + MobileSAM + MiDaS_v21_small Integrated Server"}
 
 
 @app.get("/health")
@@ -270,7 +265,7 @@ async def segment_wall_mask(
     
     # 모델 로딩 여부 확인
     if det_model is None or sam_model is None or midas_model is None:
-        logger.error("Segmentation services are unavailable due to model loading failure.")
+        logger.error("Segmentation services are unavailable due to model loading failure or MiDaS initialization failure.")
         return Response(content="Model load failed. Check server startup logs.", status_code=503)
 
     img = pil_img = results = boxes = sam_boxes = depth_img_np = depth_occlusion_mask = None 

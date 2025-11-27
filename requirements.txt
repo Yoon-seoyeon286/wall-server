@@ -1,24 +1,21 @@
-AI/ML Core
 
 torch==2.3.0
 ultralytics==8.2.19
 
-FastAPI 웹 서버
 
 fastapi==0.110.1
 uvicorn==0.29.0
 
-이미지 처리 및 데이터
+
 
 Pillow==10.3.0
 numpy==1.26.4
 opencv-python==4.9.0.80
 python-multipart==0.0.9
 
-서버 유틸리티
 
 psutil==5.9.8
 
-CORS 미들웨어
+
 
 starlette==0.36.3

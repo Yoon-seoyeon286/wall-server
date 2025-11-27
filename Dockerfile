@@ -1,7 +1,4 @@
-
-
 FROM python:3.10-slim
-
 
 RUN apt-get update && apt-get install -y --no-install-recommends 
 
@@ -29,13 +26,13 @@ libxext6
 WORKDIR /app
 
 
+
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
 
 
-requirements.txt 파일에 torch/torchvision 버전이 없다고 가정하고 직접 설치합니다.
-
 COPY requirements.txt .
+
 
 
 RUN pip install --no-cache-dir 
@@ -45,6 +42,8 @@ torch==2.2.2
 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cpu && 
 
 pip install --no-cache-dir -r requirements.txt
+
+
 
 
 

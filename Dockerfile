@@ -19,13 +19,13 @@ RUN pip install --no-cache-dir \
     torch==2.2.2 \
     torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cpu
 
-# 3. 나머지 모든 패키지 설치 (NumPy 1.x, python-multipart, timm 포함)
+# 3. 나머지 모든 패키지 설치
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 4. MobileSAM 및 YOLOv8n 모델 파일 다운로드
+# 4. MobileSAM 및 YOLOv8s 모델 파일 다운로드
 RUN wget -O /app/mobile_sam.pt https://github.com/ultralytics/assets/releases/download/v8.2.0/mobile_sam.pt
-RUN wget -O /app/yolov8n.pt https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt
+RUN wget -O /app/yolov8s.pt https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8s.pt # <-- n 대신 s로 변경
 
 # 앱 코드 복사
 COPY server.py .

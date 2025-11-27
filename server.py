@@ -27,10 +27,10 @@ app.add_middleware(
 )
 
 # ==============================================================================
-# 💡 [조정 가능한 설정] - Wall/Object Estimation Parameters
+# 💡 [조정 가능한 설정] - Wall/Object Estimation Parameters (YOLOv8s에 맞춰 감도 조정됨)
 # ==============================================================================
 # 1. YOLOv8 객체 감지 민감도: 낮출수록 더 많은 객체를 감지하여 벽 영역에서 제외 
-YOLO_CONF_THRESHOLD = 0.01
+YOLO_CONF_THRESHOLD = 0.01 
 # 2. 너무 작은 객체 박스 필터링 기준: 낮출수록 작은 객체까지 포함하여 제외
 MIN_BOX_RATIO = 0.005
 # 3. 마스크 후처리 시 사용할 모폴로지 커널 크기: 클수록 정제 효과가 강함
@@ -38,10 +38,10 @@ MORPHOLOGY_KERNEL_SIZE = 9
 # 4. 최종 마스크 경계의 Gaussian Blur 크기: 클수록 경계가 더 부드러움 
 GAUSSIAN_BLUR_SIZE = 13
 # 5. 깊이 맵 기반 객체 제거 민감도: 이 값보다 깊이 차이가 크면 객체로 간주 (낮출수록 민감)
-DEPTH_DIFF_THRESHOLD = 10 # 0-255 스케일의 깊이 맵에서 경계 차이 기준
+DEPTH_DIFF_THRESHOLD = 10 # 0-255 스케일의 깊이 맵에서 경계 차이 기준 (더 민감하게 조정)
 
 # 전역 변수
-det_model = None  # YOLOv8n
+det_model = None  # YOLOv8s
 sam_model = None  # MobileSAM
 midas_model = None # MiDaS for Monocular Depth Estimation
 midas_transform = None # MiDaS input transformation
@@ -50,27 +50,27 @@ device = "cpu"
 
 @app.on_event("startup")
 def load_models_on_startup():
-    """서버 시작 시 YOLOv8n + MobileSAM + MiDaS 로드"""
+    """서버 시작 시 YOLOv8s + MobileSAM + MiDaS 로드"""
     global det_model, sam_model, midas_model, midas_transform, device
     
-    logger.info("[🔥] Starting model loading for YOLOv8n + MobileSAM + MiDaS...")
+    logger.info("[🔥] Starting model loading for YOLOv8s + MobileSAM + MiDaS...")
     
     # CPU 환경 설정
     device = "cpu"
     logger.info(f"[⚙️] Device: {device}")
     
-    yolo_checkpoint_path = "yolov8n.pt"  
+    yolo_checkpoint_path = "yolov8s.pt"  # <-- 경로 's'로 변경
     sam_checkpoint_path = "mobile_sam.pt"
 
     try:
-        # 1. YOLOv8n 모델 로드
+        # 1. YOLOv8s 모델 로드
         if not os.path.exists(yolo_checkpoint_path):
-             logger.error(f"[❌] YOLOv8n checkpoint not found at: {yolo_checkpoint_path}")
+             logger.error(f"[❌] YOLOv8s checkpoint not found at: {yolo_checkpoint_path}")
         else:
             # CPU에서만 실행되도록 map_location 설정
             det_model = YOLO(yolo_checkpoint_path)
             det_model.to(device)
-            logger.info("[✅] YOLOv8n loaded.")
+            logger.info("[✅] YOLOv8s loaded.")
         
         # 2. MobileSAM 로드
         if not os.path.exists(sam_checkpoint_path):
@@ -110,7 +110,7 @@ def np_from_upload(file_bytes: bytes, mode="RGB") -> Image.Image:
         return None
 
 # ==============================================================================
-# --- MiDaS 깊이 맵 생성 함수 ---
+# --- MiDaS 깊이 맵 생성 함수 (이전 오류 수정 반영) ---
 # ==============================================================================
 def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.ndarray:
     """
@@ -145,7 +145,7 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
         
         depth_range = depth_max - depth_min
         
-        # 💡오류 수정 지점: depth_range가 0인 경우를 처리하고, depth_map이 확실히 NumPy 배열인지 확인
+        # 분모가 0이 되는 경우 방지
         if depth_range > 0:
             # NumPy 배열 연산으로 정규화 수행
             normalized_depth = (depth_map - depth_min) / depth_range
@@ -228,7 +228,7 @@ def create_depth_occlusion_mask(depth_map: np.ndarray, threshold=DEPTH_DIFF_THRE
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "YOLOv8n + MobileSAM + MiDaS Integrated Server"}
+    return {"status": "ok", "message": "YOLOv8s + MobileSAM + MiDaS Integrated Server"}
 
 
 @app.get("/health")
@@ -252,7 +252,7 @@ async def segment_wall_mask(
     rgb_file: UploadFile = File(..., alias="rgb_file"), # 유니티 카메라 이미지
     depth_file: UploadFile = File(..., alias="depth_file") # 유니티 깊이 지도 (흑백 PNG 가정)
 ):
-    """YOLOv8n+SAM으로 객체 감지/분할 후, MiDaS 또는 실제 깊이 지도로 최종 가려짐 마스크를 적용하여 벽 영역 추출"""
+    """YOLOv8s+SAM으로 객체 감지/분할 후, MiDaS 또는 실제 깊이 지도로 최종 가려짐 마스크를 적용하여 벽 영역 추출"""
     
     # 모델 로딩 여부 확인
     if det_model is None or sam_model is None or midas_model is None:
@@ -301,8 +301,8 @@ async def segment_wall_mask(
             depth_img_np = generate_depth_map_midas(pil_img, (w, h))
 
 
-        # 3. YOLOv8n + MobileSAM으로 초기 벽 마스크 생성
-        logger.info("[🔍] YOLOv8n: 객체 감지 중...")
+        # 3. YOLOv8s + MobileSAM으로 초기 벽 마스크 생성
+        logger.info("[🔍] YOLOv8s: 객체 감지 중...")
         results = det_model.predict(
             pil_img, conf=YOLO_CONF_THRESHOLD, imgsz=640, device=device, verbose=False,
         )[0]

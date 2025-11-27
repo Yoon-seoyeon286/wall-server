@@ -84,6 +84,7 @@ def load_models_on_startup():
         # 3. MiDaS 모델 로드 (가장 가벼운 midas_small로 복구)
         midas_type = "MiDaS_small" # <-- 가장 안정적인 모델로 복구
         # CPU에서만 실행되도록 map_location 설정
+        # trust_repo=True는 PyTorch 2.0 이상에서 필요
         midas_model = torch.hub.load("intel-isl/MiDaS", midas_type, trust_repo=True, map_location=device)
         midas_model.to(device)
         midas_model.eval()
@@ -119,14 +120,25 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
         return None
 
     try:
-        # 1. MiDaS 입력 변환 적용
-        input_batch = midas_transform(pil_img).to(device)
+        # 🚨 [수정된 부분]: PIL Image를 NumPy 배열로 변환하고 0-1 사이로 정규화하여
+        # MiDaS 변환 로직에서 발생하는 "Image / float" 오류를 해결합니다.
+        
+        # 1. PIL Image를 NumPy 배열로 변환
+        img_np = np.array(pil_img).astype(np.float32)
+        # 2. 0-1 사이로 정규화 (MiDaS 모델의 입력 요구 사항)
+        img_normalized = img_np / 255.0
+        # 3. MiDaS transform의 입력으로 PyTorch 텐서가 아닌 NumPy 배열을 기대하므로,
+        # MiDaS transform의 내부 로직에 맞춰 딕셔너리 형태로 전달
+        input_data = midas_transform({"image": img_normalized})
+        
+        # 4. 입력 텐서를 디바이스로 이동
+        input_batch = input_data["image"].unsqueeze(0).to(device)
         
         with torch.no_grad():
-            # 2. MiDaS 모델 실행
+            # 5. MiDaS 모델 실행
             prediction = midas_model(input_batch)
             
-            # 3. 출력 크기를 원본 이미지 크기에 맞게 조정
+            # 6. 출력 크기를 원본 이미지 크기에 맞게 조정
             prediction = torch.nn.functional.interpolate(
                 prediction.unsqueeze(1),
                 size=pil_img.size[::-1], # (H, W)
@@ -134,10 +146,10 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
                 align_corners=False,
             ).squeeze()
         
-        # 4. NumPy로 변환 및 정규화
+        # 7. NumPy로 변환 및 정규화
         depth_map = prediction.cpu().numpy()
         
-        # 5. 깊이 맵을 0-255 스케일로 정규화 (Occlusion Mask 생성에 활용하기 위함)
+        # 8. 깊이 맵을 0-255 스케일로 정규화 (Occlusion Mask 생성에 활용하기 위함)
         depth_min = depth_map.min()
         depth_max = depth_map.max()
         
@@ -286,8 +298,8 @@ async def segment_wall_mask(
             # 2-1. 클라이언트의 실제 깊이 데이터 사용
             depth_img = np_from_upload(depth_bytes, mode="L")
             if depth_img is not None:
-                depth_img = depth_img.resize((w, h), Image.NEAREST) 
-                depth_img_np = np.array(depth_img)
+                # 클라이언트 깊이 맵을 NumPy 배열로 변환
+                depth_img_np = np.array(depth_img.resize((w, h), Image.NEAREST))
                 logger.info("[✅] 클라이언트 깊이 지도 로드 완료.")
             else:
                  # 깊이 데이터 로드 실패 시 MiDaS 폴백

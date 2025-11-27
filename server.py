@@ -23,7 +23,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["*"]
+    allow_methods=["*"]
 )
 
 # ==============================================================================
@@ -44,14 +44,19 @@ DEPTH_DIFF_THRESHOLD = 10
 det_model = None  # YOLOv8s
 sam_model = None  # MobileSAM
 midas_model = None # MiDaS for Monocular Depth Estimation
-midas_transform = None # MiDaS input transformation
+# midas_transform = None # 더 이상 사용하지 않음
 device = "cpu"
 
+# MiDaS 모델의 전처리에 필요한 값 (MiDaS_small 기준)
+# 픽셀 값에 더하거나 빼는 평균 값 (RGB 순서)
+MIDAS_MEAN = torch.tensor([0.485, 0.456, 0.406]).float()
+# 픽셀 값을 나누는 표준 편차 값 (RGB 순서)
+MIDAS_STD = torch.tensor([0.229, 0.224, 0.225]).float()
 
 @app.on_event("startup")
 def load_models_on_startup():
     """서버 시작 시 YOLOv8s + MobileSAM + MiDaS 로드"""
-    global det_model, sam_model, midas_model, midas_transform, device
+    global det_model, sam_model, midas_model, device
     
     logger.info("[🔥] Starting model loading for YOLOv8s + MobileSAM + MiDaS...")
     
@@ -84,16 +89,12 @@ def load_models_on_startup():
         # 3. MiDaS 모델 로드 (가장 가벼운 midas_small로 복구)
         midas_type = "MiDaS_small" # <-- 가장 안정적인 모델로 복구
         # CPU에서만 실행되도록 map_location 설정
-        # trust_repo=True는 PyTorch 2.0 이상에서 필요
         midas_model = torch.hub.load("intel-isl/MiDaS", midas_type, trust_repo=True, map_location=device)
         midas_model.to(device)
         midas_model.eval()
         
-        # MiDaS 모델에 맞는 입력 변환(Transform) 함수 로드
-        midas_transforms_module = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True)
-        # MiDaS_small은 small_transform을 사용합니다.
-        midas_transform = midas_transforms_module.small_transform 
-            
+        # MiDaS transforms 모듈은 이제 사용하지 않습니다.
+
         logger.info(f"[✅] MiDaS ({midas_type}) loaded on CPU.")
 
     except Exception as e:
@@ -114,31 +115,37 @@ def np_from_upload(file_bytes: bytes, mode="RGB") -> Image.Image:
 def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.ndarray:
     """
     MiDaS 모델을 사용하여 RGB 이미지로부터 깊이 맵을 추정합니다.
+    [수동 전처리]: 오류를 회피하기 위해 transform 대신 수동으로 전처리합니다.
     """
-    if midas_model is None or midas_transform is None:
-        logger.error("MiDaS model or transform not initialized.")
+    if midas_model is None:
+        logger.error("MiDaS model not initialized.")
         return None
 
     try:
-        # 🚨 [수정된 부분]: PIL Image를 NumPy 배열로 변환하여 MiDaS transform의 표준 입력인
-        # 딕셔너리 형태로 전달합니다. 정규화(나누기 255.0)는 MiDaS transform 내부에서
-        # 처리되도록 변경하여 연산자 오류(dict/float)를 방지합니다.
+        # 1. 이미지 크기 조정 (MiDaS_small의 일반적인 입력 크기: 256x256)
+        # MiDaS_small은 크기 조정 대신 특정 비율에 맞춰 이미지 크기를 조정합니다.
+        # 여기서는 가장 간단한 방법인 원본 PIL Image를 그대로 변환합니다.
         
-        # 1. PIL Image를 NumPy 배열로 변환 (0-255 범위 유지)
-        img_np = np.array(pil_img)
+        # 2. NumPy 배열로 변환 및 정규화
+        img_np = np.array(pil_img) # H, W, 3 (uint8)
+        img_float = img_np.astype(np.float32) / 255.0 # H, W, 3 (float 0-1)
         
-        # 2. MiDaS transform의 입력: {"image": np.ndarray (0-255)}
-        # MiDaS transform이 내부적으로 정규화와 텐서 변환을 수행합니다.
-        input_data = midas_transform({"image": img_np})
+        # 3. PyTorch 텐서로 변환 및 차원 변경 (H, W, C -> C, H, W)
+        tensor = torch.from_numpy(img_float).permute(2, 0, 1) # 3, H, W
         
-        # 3. 입력 텐서를 디바이스로 이동
-        input_batch = input_data["image"].unsqueeze(0).to(device)
+        # 4. MiDaS 표준 정규화 적용 (Mean and Std)
+        # MiDaS Transform에서 하던 정규화 작업을 수동으로 수행합니다.
+        for t, m, s in zip(tensor, MIDAS_MEAN, MIDAS_STD):
+            t.sub_(m).div_(s)
+        
+        # 5. 배치 차원 추가 및 디바이스 이동
+        input_batch = tensor.unsqueeze(0).to(device) # 1, 3, H, W
         
         with torch.no_grad():
-            # 4. MiDaS 모델 실행
+            # 6. MiDaS 모델 실행
             prediction = midas_model(input_batch)
             
-            # 5. 출력 크기를 원본 이미지 크기에 맞게 조정
+            # 7. 출력 크기를 원본 이미지 크기에 맞게 조정
             prediction = torch.nn.functional.interpolate(
                 prediction.unsqueeze(1),
                 size=pil_img.size[::-1], # (H, W)
@@ -146,18 +153,15 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
                 align_corners=False,
             ).squeeze()
         
-        # 6. NumPy로 변환 및 정규화
+        # 8. NumPy로 변환 및 정규화
         depth_map = prediction.cpu().numpy()
         
-        # 7. 깊이 맵을 0-255 스케일로 정규화 (Occlusion Mask 생성에 활용하기 위함)
+        # 9. 깊이 맵을 0-255 스케일로 정규화
         depth_min = depth_map.min()
         depth_max = depth_map.max()
-        
         depth_range = depth_max - depth_min
         
-        # 분모가 0이 되는 경우 방지
         if depth_range > 0:
-            # NumPy 배열 연산으로 정규화 수행
             normalized_depth = (depth_map - depth_min) / depth_range
         else:
             normalized_depth = np.zeros_like(depth_map, dtype=np.float32)
@@ -165,7 +169,7 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
         # 0-255 범위의 8비트 정수형으로 변환
         normalized_depth_uint8 = (normalized_depth * 255).astype(np.uint8)
         
-        logger.info("[✅] MiDaS 깊이 맵 생성 완료.")
+        logger.info("[✅] MiDaS (수동 전처리) 깊이 맵 생성 완료.")
         return normalized_depth_uint8
 
     except Exception as e:

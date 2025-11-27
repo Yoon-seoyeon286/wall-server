@@ -33,4 +33,4 @@ RUN wget -O /app/yolov8s.pt https://github.com/ultralytics/assets/releases/downl
 
 COPY server.py .
 
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080"]

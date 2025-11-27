@@ -81,8 +81,9 @@ def load_models_on_startup():
             sam_model.to(device)
             logger.info("[✅] MobileSAM loaded.")
             
-        # 3. MiDaS 모델 로드 (DPT-Large 사용)
-        midas_type = "dpt_large" # <-- MiDaS_small -> dpt_large 로 변경 (최고 정확도)
+        # 3. MiDaS 모델 로드 (DPT-Hybrid 사용 - dpt_large의 대안)
+        # dpt_large는 메모리 오버로드로 인해 실패했습니다. dpt_hybrid를 사용합니다.
+        midas_type = "dpt_hybrid" # <-- dpt_large -> dpt_hybrid 로 변경 (성능과 정확도의 최적 절충안)
         # CPU에서만 실행되도록 map_location 설정
         midas_model = torch.hub.load("intel-isl/MiDaS", midas_type, trust_repo=True, map_location=device)
         midas_model.to(device)
@@ -90,7 +91,7 @@ def load_models_on_startup():
         
         # MiDaS 모델에 맞는 입력 변환(Transform) 함수 로드
         midas_transforms_module = torch.hub.load("intel-isl/MiDaS", "transforms", trust_repo=True)
-        # dpt_large는 dpt_transform을 사용합니다.
+        # dpt_hybrid는 dpt_transform을 사용합니다.
         midas_transform = midas_transforms_module.dpt_transform 
             
         logger.info(f"[✅] MiDaS ({midas_type}) loaded on CPU.")
@@ -226,7 +227,7 @@ def create_depth_occlusion_mask(depth_map: np.ndarray, threshold=DEPTH_DIFF_THRE
 
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "YOLOv8s + MobileSAM + DPT-Large Integrated Server"}
+    return {"status": "ok", "message": "YOLOv8s + MobileSAM + DPT-Hybrid Integrated Server"}
 
 
 @app.get("/health")

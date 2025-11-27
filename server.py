@@ -50,8 +50,8 @@ MIN_WALL_WIDTH_RATIO = 0.40
 
 
 # 전역 변수
-det_model = None  # YOLOv8s
-sam_model = None  # MobileSAM
+det_model = None
+sam_model = None
 device = "cpu"
 
 @app.on_event("startup")
@@ -81,8 +81,6 @@ def load_models_on_startup():
             sam_model = SAM(sam_checkpoint_path)
             sam_model.to(device)
             logger.info("[✅] MobileSAM loaded.")
-            
-        logger.info("[✅] MiDaS 깊이 모델은 메모리 문제로 인해 제거되었으며, Unity 깊이 데이터만 사용합니다.")
 
     except Exception as e:
         logger.error(f"[❌] FATAL Model loading failed: {e}", exc_info=True)

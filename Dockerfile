@@ -2,40 +2,32 @@ FROM python:3.10-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends 
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    wget \
+    libgl1 \
+    libglib2.0-0 \
+    libjpeg62-turbo \
+    libpng16-16 \
+    libsm6 \
+    libxrender1 \
+    libfontconfig1 \
+    libxext6 \
+    && rm -rf /var/lib/apt/lists/*
 
-wget 
-
-libgl1 
-
-libglib2.0-0 
-
-libjpeg62-turbo 
-
-libpng16-16 
-
-libsm6 
-
-libxrender1 
-
-libfontconfig1 
-
-libxext6 
-
-&& rm -rf /var/lib/apt/lists/*
-
+# torch, torchvision 설치를 분리해서 오류 방지
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
+
+# CPU 전용 PyTorch
+RUN pip install --no-cache-dir \
+    torch==2.2.2 \
+    torchvision==0.17.2 \
+    --index-url https://download.pytorch.org/whl/cpu
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir 
+RUN pip install --no-cache-dir -r requirements.txt
 
-torch==2.2.2 
-
-torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cpu && 
-
-pip install --no-cache-dir -r requirements.txt
-
+# 모델 다운로드
 RUN wget -O /app/mobile_sam.pt https://github.com/ultralytics/assets/releases/download/v8.2.0/mobile_sam.pt
 RUN wget -O /app/yolov8s.pt https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8s.pt
 

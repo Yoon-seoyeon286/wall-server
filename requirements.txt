@@ -5,4 +5,4 @@ numpy==1.26.4
 opencv-python==4.9.0.80
 python-multipart==0.0.9
 psutil==5.9.8
-starlette==0.36.3
+starlette==0.37.2

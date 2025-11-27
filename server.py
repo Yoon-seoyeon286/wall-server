@@ -129,7 +129,7 @@ def create_depth_occlusion_mask(depth_map: np.ndarray, threshold=DEPTH_DIFF_THRE
 
 
 # 🚪 Wall Mask API
-@app.post("/mask")
+@app.post("/segment_wall_mask")
 async def generate_mask(
         image: UploadFile = File(...),
         depth: UploadFile = File(...)

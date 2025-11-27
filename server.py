@@ -30,15 +30,15 @@ app.add_middleware(
 # 💡 [조정 가능한 설정] - Wall/Object Estimation Parameters
 # ==============================================================================
 # 1. YOLOv8 객체 감지 민감도: 낮출수록 더 많은 객체를 감지하여 벽 영역에서 제외 
-YOLO_CONF_THRESHOLD = 0.05 
+YOLO_CONF_THRESHOLD = 0.01
 # 2. 너무 작은 객체 박스 필터링 기준: 낮출수록 작은 객체까지 포함하여 제외
-MIN_BOX_RATIO = 0.01
+MIN_BOX_RATIO = 0.005
 # 3. 마스크 후처리 시 사용할 모폴로지 커널 크기: 클수록 정제 효과가 강함
 MORPHOLOGY_KERNEL_SIZE = 9
 # 4. 최종 마스크 경계의 Gaussian Blur 크기: 클수록 경계가 더 부드러움 
 GAUSSIAN_BLUR_SIZE = 13
 # 5. 깊이 맵 기반 객체 제거 민감도: 이 값보다 깊이 차이가 크면 객체로 간주 (낮출수록 민감)
-DEPTH_DIFF_THRESHOLD = 15 # 0-255 스케일의 깊이 맵에서 경계 차이 기준
+DEPTH_DIFF_THRESHOLD = 10 # 0-255 스케일의 깊이 맵에서 경계 차이 기준
 
 # 전역 변수
 det_model = None  # YOLOv8n

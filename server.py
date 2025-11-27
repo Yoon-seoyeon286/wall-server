@@ -10,6 +10,7 @@ from ultralytics import YOLO, SAM
 from fastapi import FastAPI, File, UploadFile, Response, Form
 from fastapi.middleware.cors import CORSMiddleware
 import torch.hub
+import psutil # 메모리 사용량 추적을 위해 추가
 
 # 로깅 설정
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
@@ -23,7 +24,6 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-
 )
 
 # ==============================================================================
@@ -46,8 +46,7 @@ sam_model = None  # MobileSAM
 midas_model = None # MiDaS for Monocular Depth Estimation
 device = "cpu"
 
-# 🚨 MiDaS v2.1 Small의 표준 전처리 값으로 변경 (0.5, 0.5, 0.5)
-# MiDaS Transform을 우회하고 수동 전처리를 위해 사용
+# MiDaS v2.1 Small의 표준 전처리 값
 MIDAS_MEAN = torch.tensor([0.5, 0.5, 0.5]).float()
 MIDAS_STD = torch.tensor([0.5, 0.5, 0.5]).float()
 
@@ -83,7 +82,6 @@ def load_models_on_startup():
             logger.info("[✅] MobileSAM loaded.")
             
         # 3. MiDaS 모델 로드 (MiDaS_v21_small로 교체하여 안정성 확보)
-        # 🚨 이 부분이 importlib 오류를 일으킨 주요 원인일 수 있습니다.
         midas_type = "MiDaS_v21_small" 
         midas_model = torch.hub.load("intel-isl/MiDaS", midas_type, trust_repo=True, map_location=device)
         midas_model.to(device)
@@ -126,19 +124,18 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
         tensor = torch.from_numpy(img_float).permute(2, 0, 1) # 3, H, W
         
         # 3. MiDaS 표준 정규화 적용 (Mean and Std)
-        # MiDaS Transform에서 하던 정규화 작업을 수동으로 수행합니다.
-        # tensor = (tensor - MIDAS_MEAN[:, None, None]) / MIDAS_STD[:, None, None]
-        # 위 코드 대신 zip을 사용해 딕셔너리 연산자 오류를 완벽하게 방지
         for i in range(3):
             tensor[i].sub_(MIDAS_MEAN[i]).div_(MIDAS_STD[i])
 
         
         # 4. 배치 차원 추가 및 디바이스 이동
         input_batch = tensor.unsqueeze(0).to(device) # 1, 3, H, W
+        del tensor # 🚨 메모리 해제
         
         with torch.no_grad():
             # 5. MiDaS 모델 실행
             prediction = midas_model(input_batch)
+            del input_batch # 🚨 메모리 해제
             
             # 6. 출력 크기를 원본 이미지 크기에 맞게 조정
             prediction = torch.nn.functional.interpolate(
@@ -150,6 +147,7 @@ def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.nda
         
         # 7. NumPy로 변환 및 정규화
         depth_map = prediction.cpu().numpy()
+        del prediction # 🚨 메모리 해제
         
         # 8. 깊이 맵을 0-255 스케일로 정규화
         depth_min = depth_map.min()
@@ -224,9 +222,11 @@ def create_depth_occlusion_mask(depth_map: np.ndarray, threshold=DEPTH_DIFF_THRE
     
     # 경계 강도 계산 (Magnitude)
     magnitude = cv2.magnitude(grad_x, grad_y)
+    del grad_x, grad_y # 🚨 메모리 해제
     
     # 임계값 이상의 경계만 마스킹 (객체 = 1, 배경 = 0)
     occlusion_mask = (magnitude > threshold).astype(np.uint8)
+    del magnitude # 🚨 메모리 해제
     
     # 마스크 확장 (dilate)하여 객체 영역을 확실하게 덮습니다.
     kernel = np.ones((5, 5), np.uint8)
@@ -242,7 +242,6 @@ async def root():
 
 @app.get("/health")
 async def health():
-    import psutil
     process = psutil.Process()
     memory_mb = process.memory_info().rss / 1024 / 1024
     
@@ -263,17 +262,23 @@ async def segment_wall_mask(
 ):
     """YOLOv8s+SAM으로 객체 감지/분할 후, MiDaS 또는 실제 깊이 지도로 최종 가려짐 마스크를 적용하여 벽 영역 추출"""
     
+    process = psutil.Process()
+    initial_memory = process.memory_info().rss / 1024 / 1024
+    logger.info(f"[🧠] 요청 시작 메모리: {initial_memory:.2f} MB")
+    
     # 모델 로딩 여부 확인
     if det_model is None or sam_model is None or midas_model is None:
         logger.error("Segmentation services are unavailable due to model loading failure or MiDaS initialization failure.")
         return Response(content="Model load failed. Check server startup logs.", status_code=503)
 
-    img = pil_img = results = boxes = sam_boxes = depth_img_np = depth_occlusion_mask = None 
+    pil_img = depth_img_np = depth_occlusion_mask = None 
 
     try:
         # 1. RGB 이미지 로드 및 전처리
         rgb_bytes = await rgb_file.read()
         pil_img = np_from_upload(rgb_bytes, mode="RGB")
+        del rgb_bytes # 🚨 메모리 해제
+        
         if pil_img is None:
             logger.error("RGB file could not be loaded.")
             return Response(content="Invalid RGB image file.", status_code=400)
@@ -284,7 +289,8 @@ async def segment_wall_mask(
         if max(pil_img.size) > max_size:
             ratio = max_size / max(pil_img.size)
             new_size = tuple(int(dim * ratio) for dim in pil_img.size)
-            pil_img = pil_img.resize(new_size, Image.LANCZOS)
+            # PIL Image.resize는 새 이미지를 반환하므로 이전 pil_img는 GC 대상이 됨
+            pil_img = pil_img.resize(new_size, Image.LANCZOS) 
 
         w, h = pil_img.size
         logger.info(f"[📸] RGB 이미지: {w}x{h}")
@@ -292,77 +298,91 @@ async def segment_wall_mask(
         # 2. 깊이 지도 로드 및 MiDaS 폴백 적용
         depth_bytes = await depth_file.read()
         
-        # 클라이언트에서 보낸 깊이 데이터가 유효한지 확인 (빈 PNG는 100바이트 미만일 수 있음)
+        # 클라이언트 깊이 데이터 유효성 검사
         if depth_bytes and len(depth_bytes) > 100: 
-            # 2-1. 클라이언트의 실제 깊이 데이터 사용
             depth_img = np_from_upload(depth_bytes, mode="L")
             if depth_img is not None:
-                # 클라이언트 깊이 맵을 NumPy 배열로 변환
                 depth_img_np = np.array(depth_img.resize((w, h), Image.NEAREST))
+                del depth_img
                 logger.info("[✅] 클라이언트 깊이 지도 로드 완료.")
             else:
-                 # 깊이 데이터 로드 실패 시 MiDaS 폴백
                 logger.warning("[⚠️] 클라이언트 깊이 데이터 로드 실패. MiDaS로 대체합니다.")
                 depth_img_np = generate_depth_map_midas(pil_img, (w, h))
         else:
-            # 2-2. 클라이언트 깊이 데이터가 없을 경우 MiDaS 사용 (폴백)
             logger.warning("[⚠️] 클라이언트 깊이 파일이 비어 있습니다. MiDaS로 깊이 맵을 생성합니다.")
             depth_img_np = generate_depth_map_midas(pil_img, (w, h))
-
+        
+        del depth_bytes # 🚨 메모리 해제
 
         # 3. YOLOv8s + MobileSAM으로 초기 벽 마스크 생성
         logger.info("[🔍] YOLOv8s: 객체 감지 중...")
         results = det_model.predict(
             pil_img, conf=YOLO_CONF_THRESHOLD, imgsz=640, device=device, verbose=False,
         )[0]
+        
         xyxy = results.boxes.xyxy.cpu().numpy() if results.boxes is not None else []
+        del results # 🚨 YOLO 결과 객체 즉시 메모리 해제
+        
         boxes = filter_small_boxes(xyxy, pil_img.size[::-1])
-        logger.info(f"[✅] {len(boxes)}개의 유효 객체 박스 발견 (Threshold: {YOLO_CONF_THRESHOLD})")
+        del xyxy
+        logger.info(f"[✅] {len(boxes)}개의 유효 객체 박스 발견")
 
         if not boxes:
             logger.warning("[⚠️] 객체 박스가 없어 전체 이미지(벽) 박스 사용.")
             initial_wall_mask = np.ones((h, w), dtype=np.uint8) * 255
         else:
             logger.info("[🎨] MobileSAM: 객체 분할 중...")
-            sam_boxes = boxes
             res = sam_model.predict(
-                pil_img, bboxes=sam_boxes, device=device, retina_masks=False, verbose=False
+                pil_img, bboxes=boxes, device=device, retina_masks=False, verbose=False
             )[0]
-
+            del boxes # 🚨 메모리 해제
+            
             if res.masks is None:
                 logger.warning("[⚠️] MobileSAM 분할 실패. 전체 화면 반환.")
                 initial_wall_mask = np.ones((h, w), dtype=np.uint8) * 255
+                del res
             else:
                 # 마스크 통합 및 반전 (벽 영역 추출)
                 mask_data = res.masks.data.cpu().numpy()
+                del res # 🚨 SAM 결과 객체 즉시 메모리 해제
+                
                 union_objects = (mask_data.sum(axis=0) > 0).astype(np.uint8)
+                del mask_data
+                
                 background_mask = 1 - union_objects # 객체 마스크 반전
+                del union_objects
                 
                 # 후처리 (가장 큰 배경 영역만 남김)
                 refined_background = post_refine(background_mask) 
-                initial_wall_mask = (refined_background * 255).astype(np.uint8)
+                del background_mask
                 
-                del mask_data, union_objects, background_mask, refined_background
+                initial_wall_mask = (refined_background * 255).astype(np.uint8)
+                del refined_background
 
 
         # 4. 깊이 지도를 이용한 최종 객체 제외 마스킹 (Depth Occlusion)
         final_mask_img = initial_wall_mask.copy()
+        del initial_wall_mask
         
         if depth_img_np is not None:
             depth_occlusion_mask = create_depth_occlusion_mask(depth_img_np)
+            del depth_img_np # 🚨 메모리 해제
             
-            # 깊이 마스크를 반전하여 벽 마스크(벽=1, 객체=0)를 얻고 기존 마스크와 AND 연산
-            wall_from_depth = 1 - depth_occlusion_mask 
-            
-            # 2D AI 마스크와 3D 깊이 마스크를 결합 (두 마스크 모두 1인 영역만 남김)
-            combined_mask = cv2.bitwise_and(final_mask_img, wall_from_depth * 255)
-            final_mask_img = combined_mask
-            logger.info("[✅] 깊이 데이터(클라이언트 or MiDaS)로 최종 가려짐 보정 완료.")
-            
-            del wall_from_depth, combined_mask
+            if depth_occlusion_mask is not None:
+                # 깊이 마스크를 반전하여 벽 마스크(벽=1, 객체=0)를 얻고 기존 마스크와 AND 연산
+                wall_from_depth = 1 - depth_occlusion_mask 
+                del depth_occlusion_mask
+                
+                # 2D AI 마스크와 3D 깊이 마스크를 결합
+                combined_mask = cv2.bitwise_and(final_mask_img, wall_from_depth * 255)
+                final_mask_img = combined_mask
+                del wall_from_depth, combined_mask
+                
+                logger.info("[✅] 깊이 데이터(클라이언트 or MiDaS)로 최종 가려짐 보정 완료.")
+            else:
+                logger.warning("[⚠️] 깊이 마스크 생성 실패. 2D AI 마스크만 사용합니다.")
         else:
             logger.warning("[⚠️] 깊이 데이터가 없어 2D AI 마스크만 사용합니다.")
-
 
         # 5. 최종 마스크 정리 및 인코딩
         
@@ -377,17 +397,20 @@ async def segment_wall_mask(
                 interpolation=cv2.INTER_LINEAR
             )
         
+        del pil_img
+        
         # PNG 인코딩
         _, png = cv2.imencode(".png", final_mask_img)
-
-        # 🚨 메모리 정리 강화 
-        del pil_img, results, boxes, sam_boxes, depth_img_np, depth_occlusion_mask
-        
-        gc.collect() 
+        del final_mask_img, _ # 🚨 메모리 해제
 
         final_png_bytes = png.tobytes()
-        del png, _
-        gc.collect()
+        del png
+        
+        # 🚨 최종 메모리 정리 및 로깅
+        gc.collect() 
+        final_memory = process.memory_info().rss / 1024 / 1024
+        logger.info(f"[🧠] 요청 완료 메모리: {final_memory:.2f} MB (변동: {final_memory - initial_memory:.2f} MB)")
+
 
         return Response(
             content=final_png_bytes,

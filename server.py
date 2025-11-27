@@ -29,17 +29,17 @@ app.add_middleware(
 # 💡 [조정 가능한 설정] - Wall/Object Estimation Parameters
 # ==============================================================================
 # 1. YOLOv8 객체 감지 민감도
-YOLO_CONF_THRESHOLD = 0.01 
+YOLO_CONF_THRESHOLD = 0.005 
 # 2. 너무 작은 객체 박스 필터링 기준
-MIN_BOX_RATIO = 0.005
+MIN_BOX_RATIO = 0.003
 # 3. 마스크 후처리 시 사용할 모폴로지 커널 크기
-MORPHOLOGY_KERNEL_SIZE = 9
+MORPHOLOGY_KERNEL_SIZE = 11
 # 4. 최종 마스크 경계의 Gaussian Blur 크기
-GAUSSIAN_BLUR_SIZE = 13
+GAUSSIAN_BLUR_SIZE = 21
 # 5. 깊이 맵 기반 객체 제거 민감도
-DEPTH_DIFF_THRESHOLD = 5 
+DEPTH_DIFF_THRESHOLD = 8 
 # 6. 메모리 보호를 위한 최대 이미지 크기 제한 (1280x1280 픽셀 기준)
-MAX_IMAGE_SIZE_PIXELS = 1280 
+MAX_IMAGE_SIZE_PIXELS = 640 
 
 # 전역 변수
 det_model = None  # YOLOv8s

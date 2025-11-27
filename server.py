@@ -38,11 +38,11 @@ MORPHOLOGY_KERNEL_SIZE = 11
 # 4. 최종 마스크 경계의 Gaussian Blur 크기
 GAUSSIAN_BLUR_SIZE = 21
 # 5. 깊이 맵 기반 객체 제거 민감도
-DEPTH_DIFF_THRESHOLD = 8 
+DEPTH_DIFF_THRESHOLD = 8
 # 6. 메모리 보호를 위한 최대 이미지 크기 제한
-MAX_IMAGE_SIZE_PIXELS = 640 
+MAX_IMAGE_SIZE_PIXELS = 640
 # 7. 천장 영역으로 간주하고 제거할 상단 비율 (0.0 - 1.0)
-CEILING_EXCLUSION_RATIO = 0.15 
+CEILING_EXCLUSION_RATIO = 0.15
 # 8. 바닥 영역으로 간주하고 제거할 하단 비율 (0.0 - 1.0)
 FLOOR_EXCLUSION_RATIO = 0.20
 # 9. 문/창문 등 좁은 영역을 제거할 최소 수직 너비 비율

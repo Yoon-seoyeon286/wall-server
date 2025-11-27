@@ -26,11 +26,9 @@ app.add_middleware(
     expose_headers=["*"]
 )
 
-# ==============================================================================
-# 💡 [조정 가능한 설정] - Wall/Object Estimation Parameters (YOLOv8s에 맞춰 감도 조정됨)
-# ==============================================================================
+
 # 1. YOLOv8 객체 감지 민감도: 낮출수록 더 많은 객체를 감지하여 벽 영역에서 제외 
-YOLO_CONF_THRESHOLD = 0.01 
+YOLO_CONF_THRESHOLD = 0.05 
 # 2. 너무 작은 객체 박스 필터링 기준: 낮출수록 작은 객체까지 포함하여 제외
 MIN_BOX_RATIO = 0.005
 # 3. 마스크 후처리 시 사용할 모폴로지 커널 크기: 클수록 정제 효과가 강함
@@ -38,7 +36,7 @@ MORPHOLOGY_KERNEL_SIZE = 9
 # 4. 최종 마스크 경계의 Gaussian Blur 크기: 클수록 경계가 더 부드러움 
 GAUSSIAN_BLUR_SIZE = 13
 # 5. 깊이 맵 기반 객체 제거 민감도: 이 값보다 깊이 차이가 크면 객체로 간주 (낮출수록 민감)
-DEPTH_DIFF_THRESHOLD = 10 # 0-255 스케일의 깊이 맵에서 경계 차이 기준 (더 민감하게 조정)
+DEPTH_DIFF_THRESHOLD = 7 # 0-255 스케일의 깊이 맵에서 경계 차이 기준 (더 민감하게 조정)
 
 # 전역 변수
 det_model = None  # YOLOv8s
@@ -53,33 +51,33 @@ def load_models_on_startup():
     """서버 시작 시 YOLOv8s + MobileSAM + MiDaS 로드"""
     global det_model, sam_model, midas_model, midas_transform, device
     
-    logger.info("[🔥] Starting model loading for YOLOv8s + MobileSAM + MiDaS...")
+    logger.info("Starting model loading for YOLOv8s + MobileSAM + MiDaS...")
     
     # CPU 환경 설정
     device = "cpu"
-    logger.info(f"[⚙️] Device: {device}")
+    logger.info(f"Device: {device}")
     
-    yolo_checkpoint_path = "yolov8s.pt"  # <-- 경로 's'로 변경
+    yolo_checkpoint_path = "yolov8s.pt"  
     sam_checkpoint_path = "mobile_sam.pt"
 
     try:
         # 1. YOLOv8s 모델 로드
         if not os.path.exists(yolo_checkpoint_path):
-             logger.error(f"[❌] YOLOv8s checkpoint not found at: {yolo_checkpoint_path}")
+             logger.error(f"YOLOv8s checkpoint not found at: {yolo_checkpoint_path}")
         else:
             # CPU에서만 실행되도록 map_location 설정
             det_model = YOLO(yolo_checkpoint_path)
             det_model.to(device)
-            logger.info("[✅] YOLOv8s loaded.")
+            logger.info("YOLOv8s loaded.")
         
         # 2. MobileSAM 로드
         if not os.path.exists(sam_checkpoint_path):
-             logger.error(f"[❌] MobileSAM checkpoint not found at: {sam_checkpoint_path}")
+             logger.error(f" MobileSAM checkpoint not found at: {sam_checkpoint_path}")
         else:
             # CPU에서만 실행되도록 map_location 설정
             sam_model = SAM(sam_checkpoint_path)
             sam_model.to(device)
-            logger.info("[✅] MobileSAM loaded.")
+            logger.info("MobileSAM loaded.")
             
         # 3. MiDaS 모델 로드 (MiDaS_small 사용)
         midas_type = "MiDaS_small"
@@ -95,10 +93,10 @@ def load_models_on_startup():
         else:
             midas_transform = midas_transforms_module.dpt_transform
             
-        logger.info(f"[✅] MiDaS ({midas_type}) loaded on CPU.")
+        logger.info(f"MiDaS ({midas_type}) loaded on CPU.")
 
     except Exception as e:
-        logger.error(f"[❌] FATAL Model loading failed: {e}", exc_info=True)
+        logger.error(f"FATAL Model loading failed: {e}", exc_info=True)
 
 
 def np_from_upload(file_bytes: bytes, mode="RGB") -> Image.Image:
@@ -109,9 +107,8 @@ def np_from_upload(file_bytes: bytes, mode="RGB") -> Image.Image:
         logger.error(f"Failed to open image from bytes: {e}")
         return None
 
-# ==============================================================================
-# --- MiDaS 깊이 맵 생성 함수 (이전 오류 수정 반영) ---
-# ==============================================================================
+# --- MiDaS 깊이 맵 생성 함수---
+
 def generate_depth_map_midas(pil_img: Image.Image, output_size: tuple) -> np.ndarray:
     """
     MiDaS 모델을 사용하여 RGB 이미지로부터 깊이 맵을 추정합니다.
@@ -278,7 +275,7 @@ async def segment_wall_mask(
             pil_img = pil_img.resize(new_size, Image.LANCZOS)
 
         w, h = pil_img.size
-        logger.info(f"[📸] RGB 이미지: {w}x{h}")
+        logger.info(f"RGB 이미지: {w}x{h}")
         
         # 2. 깊이 지도 로드 및 MiDaS 폴백 적용
         depth_bytes = await depth_file.read()
@@ -290,38 +287,38 @@ async def segment_wall_mask(
             if depth_img is not None:
                 depth_img = depth_img.resize((w, h), Image.NEAREST) 
                 depth_img_np = np.array(depth_img)
-                logger.info("[✅] 클라이언트 깊이 지도 로드 완료.")
+                logger.info("클라이언트 깊이 지도 로드 완료.")
             else:
                  # 깊이 데이터 로드 실패 시 MiDaS 폴백
-                logger.warning("[⚠️] 클라이언트 깊이 데이터 로드 실패. MiDaS로 대체합니다.")
+                logger.warning("클라이언트 깊이 데이터 로드 실패. MiDaS로 대체합니다.")
                 depth_img_np = generate_depth_map_midas(pil_img, (w, h))
         else:
             # 2-2. 클라이언트 깊이 데이터가 없을 경우 MiDaS 사용 (폴백)
-            logger.warning("[⚠️] 클라이언트 깊이 파일이 비어 있습니다. MiDaS로 깊이 맵을 생성합니다.")
+            logger.warning("클라이언트 깊이 파일이 비어 있습니다. MiDaS로 깊이 맵을 생성합니다.")
             depth_img_np = generate_depth_map_midas(pil_img, (w, h))
 
 
         # 3. YOLOv8s + MobileSAM으로 초기 벽 마스크 생성
-        logger.info("[🔍] YOLOv8s: 객체 감지 중...")
+        logger.info("YOLOv8s: 객체 감지 중...")
         results = det_model.predict(
             pil_img, conf=YOLO_CONF_THRESHOLD, imgsz=640, device=device, verbose=False,
         )[0]
         xyxy = results.boxes.xyxy.cpu().numpy() if results.boxes is not None else []
         boxes = filter_small_boxes(xyxy, pil_img.size[::-1])
-        logger.info(f"[✅] {len(boxes)}개의 유효 객체 박스 발견 (Threshold: {YOLO_CONF_THRESHOLD})")
+        logger.info(f"{len(boxes)}개의 유효 객체 박스 발견 (Threshold: {YOLO_CONF_THRESHOLD})")
 
         if not boxes:
-            logger.warning("[⚠️] 객체 박스가 없어 전체 이미지(벽) 박스 사용.")
+            logger.warning("객체 박스가 없어 전체 이미지(벽) 박스 사용.")
             initial_wall_mask = np.ones((h, w), dtype=np.uint8) * 255
         else:
-            logger.info("[🎨] MobileSAM: 객체 분할 중...")
+            logger.info("MobileSAM: 객체 분할 중...")
             sam_boxes = boxes
             res = sam_model.predict(
                 pil_img, bboxes=sam_boxes, device=device, retina_masks=False, verbose=False
             )[0]
 
             if res.masks is None:
-                logger.warning("[⚠️] MobileSAM 분할 실패. 전체 화면 반환.")
+                logger.warning("MobileSAM 분할 실패. 전체 화면 반환.")
                 initial_wall_mask = np.ones((h, w), dtype=np.uint8) * 255
             else:
                 # 마스크 통합 및 반전 (벽 영역 추출)
@@ -348,11 +345,11 @@ async def segment_wall_mask(
             # 2D AI 마스크와 3D 깊이 마스크를 결합 (두 마스크 모두 1인 영역만 남김)
             combined_mask = cv2.bitwise_and(final_mask_img, wall_from_depth * 255)
             final_mask_img = combined_mask
-            logger.info("[✅] 깊이 데이터(클라이언트 or MiDaS)로 최종 가려짐 보정 완료.")
+            logger.info("깊이 데이터(클라이언트 or MiDaS)로 최종 가려짐 보정 완료.")
             
             del wall_from_depth, combined_mask
         else:
-            logger.warning("[⚠️] 깊이 데이터가 없어 2D AI 마스크만 사용합니다.")
+            logger.warning("깊이 데이터가 없어 2D AI 마스크만 사용합니다.")
 
 
         # 5. 최종 마스크 정리 및 인코딩
@@ -394,7 +391,7 @@ async def segment_wall_mask(
         )
 
     except Exception as e:
-        logger.error(f"❌ ERROR in segmentation processing: {e}", exc_info=True)
+        logger.error(f"ERROR in segmentation processing: {e}", exc_info=True)
         gc.collect()
         return Response(
             content=f"Internal Server Error: {e}".encode(),

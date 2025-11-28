@@ -26,7 +26,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 🌟 설정값
 YOLO_CONF_THRESHOLD = 0.001
 MIN_BOX_RATIO = 0.003
 MORPHOLOGY_KERNEL_SIZE = 11

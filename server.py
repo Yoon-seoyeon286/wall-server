@@ -7,7 +7,7 @@ import gc
 import logging
 from PIL import Image
 from ultralytics import YOLO, SAM
-from fastapi import FastAPI, File, UploadFile, Response, Form
+from fastapi import FastAPI, File, UploadFile, Response
 from fastapi.middleware.cors import CORSMiddleware
 import psutil
 
@@ -153,9 +153,27 @@ async def generate_mask(
     if len(boxes) == 0:
         return {"error": "No Wall Detected"}
 
-    # 🎯 SAM 마스크 선택
+    # 🎯 첫 번째 bbox 사용
     x1, y1, x2, y2 = boxes[0].astype(int)
-    mask = sam_model.predict(img, [x1, y1, x2, y2])[0]
+
+    # 🎯 SAM predict (generator → list)
+    sam_results = list(sam_model.predict(img, bboxes=[[x1, y1, x2, y2]]))
+
+    if len(sam_results) == 0:
+        return {"error": "SAM returned no results"}
+
+    res = sam_results[0]
+
+    if res.masks is None or res.masks.data is None:
+        return {"error": "SAM mask not found"}
+
+    # SAM 결과 mask 추출
+    mask = res.masks.data[0].cpu().numpy().astype(np.uint8)
+
+    # SAM이 종종 원본 크기와 다르므로 리사이즈
+    mask = cv2.resize(mask, (img.shape[1], img.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+    # 🧼 후처리
     mask = post_refine(mask)
 
     # ⛓ 깊이 기반 제거
